@@ -69,6 +69,9 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
   FileTrail's marked block and refuse malformed markers. Respect ZDOTDIR and
   XDG_CONFIG_HOME. Hooks invoke the absolute executable path with shell-specific
   quoting, so upgrades at the same location update completion automatically.
+  Initialize Zsh with compinit -i: retain permission checks and skip insecure
+  completion directories without prompting. Do not bypass the audit with -u or
+  -C. Test safe and insecure fpath entries without a TTY.
   install.sh wraps cargo install followed by completion installation. Never use
   build.rs to modify shell configuration during builds. Test with isolated HOME,
   ZDOTDIR, and XDG_CONFIG_HOME; never modify the developer's real shell profiles.

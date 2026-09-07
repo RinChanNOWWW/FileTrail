@@ -94,9 +94,11 @@ fn hook(shell: Shell, binary: &Path) -> Result<String> {
             "if [[ -o interactive && -x {quoted} ]]; then\n\
              if (( ! $+functions[compdef] )); then\n\
              autoload -Uz compinit\n\
-             compinit\n\
+             compinit -i\n\
              fi\n\
+             if (( $+functions[compdef] )); then\n\
              eval \"$({quoted} completions zsh)\"\n\
+             fi\n\
              fi\n"
         ),
         Shell::Fish => format!(

@@ -239,20 +239,46 @@ fn bash_completion_loads_and_completes_commands_options_and_paths() {
 
 #[test]
 fn zsh_completion_registers_with_and_without_existing_compinit() {
-    let f = CompletionFixture::new();
-    for prefix in ["", "autoload -Uz compinit\ncompinit\n"] {
-        fs::write(f.home.join(".zshrc"), prefix).unwrap();
-        f.install("zsh");
-        output_text(
-            f.command("zsh")
+    for insecure in [false, true] {
+        for prefix in ["", "autoload -Uz compinit\ncompinit -i\n"] {
+            let f = CompletionFixture::new();
+            let functions = f.temp.path().join("completion functions");
+            fs::create_dir(&functions).unwrap();
+            fs::write(
+                functions.join("_filetrail_fixture"),
+                "#compdef filetrail-fixture\n",
+            )
+            .unwrap();
+            fs::set_permissions(
+                &functions,
+                fs::Permissions::from_mode(if insecure { 0o777 } else { 0o755 }),
+            )
+            .unwrap();
+            fs::write(
+                f.home.join(".zshrc"),
+                format!("fpath=(\"$FILETRAIL_TEST_FPATH\" $fpath)\n{prefix}"),
+            )
+            .unwrap();
+            f.install("zsh");
+            // No TTY: an audit prompt must not abort completion initialization.
+            // Safe fixture completions should load; unsafe ones must be ignored.
+            let output = f.command("zsh")
+                .env("FILETRAIL_TEST_FPATH", &functions)
+                .env("FILETRAIL_TEST_COMPLETION", if insecure { "" } else { "_filetrail_fixture" })
                 .args([
                     "-d",
                     "-ic",
-                    "[[ ${_comps[filetrail]-} == _filetrail ]] && (( $+functions[_filetrail] ))",
+                    "[[ ${_comps[filetrail]-} == _filetrail && ${_comps[filetrail-fixture]-} == $FILETRAIL_TEST_COMPLETION ]] && (( $+functions[_filetrail] ))",
                 ])
                 .output()
-                .unwrap(),
-        );
+                .unwrap();
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output_text(output);
+        }
     }
 }
 
