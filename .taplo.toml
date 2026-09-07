@@ -1,0 +1,7 @@
+exclude = ["Cargo.lock", "target/**"]
+include = ["**/*.toml"]
+
+[formatting]
+column_width = 100
+reorder_inline_tables = true
+reorder_keys = true

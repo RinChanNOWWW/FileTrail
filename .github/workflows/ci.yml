@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  format:
+    name: Rust and TOML formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Check Rust formatting (one import per line)
+        run: cargo fmt --all -- --check
+      - name: Install pinned TOML formatter
+        run: cargo install taplo-cli --version 0.10.0 --locked
+      - name: Check TOML formatting and alphabetical key order
+        run: taplo fmt --check
+
+  check:
+    name: Check, Clippy, tests, and binary (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Compile all targets
+        run: cargo check --locked --all-targets
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --locked --all-targets
+      - name: Documentation tests
+        run: cargo test --locked --doc
+      - name: Build standalone binary
+        run: cargo build --locked --release
+      - name: Smoke test
+        run: ./target/release/filetrail --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filetrail-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/filetrail
+          if-no-files-found: error

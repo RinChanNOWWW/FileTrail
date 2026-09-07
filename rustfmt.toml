@@ -1,0 +1,5 @@
+edition = "2024"
+group_imports = "StdExternalCrate"
+imports_granularity = "Item"
+reorder_imports = true
+unstable_features = true
