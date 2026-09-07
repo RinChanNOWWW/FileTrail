@@ -32,9 +32,16 @@ impl CompletionFixture {
     }
 
     fn command(&self, executable: impl AsRef<std::ffi::OsStr>) -> Command {
+        // Fish only autoloads completions for commands it can resolve. Model an
+        // installed binary instead of depending on FileTrail in the user's PATH.
+        let mut paths = vec![self.binary.parent().unwrap().to_owned()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         let mut command = Command::new(executable);
         command
             .current_dir(&self.home)
+            .env("PATH", std::env::join_paths(paths).unwrap())
             .env("HOME", &self.home)
             .env("ZDOTDIR", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -253,6 +260,13 @@ fn zsh_completion_registers_with_and_without_existing_compinit() {
 fn fish_completion_autoloads_commands_options_and_paths() {
     let f = CompletionFixture::new();
     f.install("fish");
+    let resolved = output_text(
+        f.command("fish")
+            .args(["-c", "command -s filetrail"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(resolved.trim_end(), f.binary.to_str().unwrap());
     fs::write(f.home.join("example.txt"), "").unwrap();
     for (line, expected) in [
         ("filetrail co", "commit"),
@@ -262,12 +276,14 @@ fn fish_completion_autoloads_commands_options_and_paths() {
         ("filetrail add --from ex", "example.txt"),
     ] {
         let script = format!("complete -C '{line}'");
-        let output = output_text(f.command("fish").args(["-c", &script]).output().unwrap());
+        let result = f.command("fish").args(["-c", &script]).output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+        let output = output_text(result);
         assert!(
             output
                 .lines()
                 .any(|line| line.split('\t').next() == Some(expected)),
-            "{line}: {output}"
+            "{line}: {output}\nstderr: {stderr}"
         );
     }
 }
