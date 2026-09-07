@@ -13,6 +13,7 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
   does not require a separate Rust or Git installation.
 - Run `cargo fmt --all`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked --all-targets`, and `cargo test --locked --doc`.
+- Completion integration tests require Bash, Zsh, and Fish on PATH.
 - Run `taplo fmt` and `taplo fmt --check` with taplo-cli 0.10.0.
 - Every Rust import must be its own `use` statement. Do not use grouped braces.
   rustfmt's `imports_granularity = "Item"` enforces this on the pinned nightly.
@@ -61,6 +62,16 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
   All disk mutations share operation.lock; daemon.lock prevents duplicate daemons.
   CLI config edits are atomic and picked up by the daemon without restarting it.
 - service.rs renders/installs user-level launchd or systemd definitions.
+- completion.rs installs explicitly requested Bash, Zsh, and Fish completion hooks.
+  Keep generation derived from the Clap command tree, including nested commands.
+  Generation and installation must work before init without creating application data.
+  Preserve existing shell configuration, symlinks, and permissions; replace only
+  FileTrail's marked block and refuse malformed markers. Respect ZDOTDIR and
+  XDG_CONFIG_HOME. Hooks invoke the absolute executable path with shell-specific
+  quoting, so upgrades at the same location update completion automatically.
+  install.sh wraps cargo install followed by completion installation. Never use
+  build.rs to modify shell configuration during builds. Test with isolated HOME,
+  ZDOTDIR, and XDG_CONFIG_HOME; never modify the developer's real shell profiles.
 - Default synchronization preserves deleted source files in the destination.
   Opt-in deletion applies only to previously synchronized paths. A missing source
   root directory must never trigger mass deletion.
