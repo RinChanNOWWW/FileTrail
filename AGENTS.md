@@ -26,63 +26,20 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
 
 ## Architecture and invariants
 
-- config.rs owns editable TOML mappings, validation, atomic config writes, and the shared
-  operation lock. Repository path, init subdirectory, and entry target are
-  separate concepts: destination = repository / subdir / target / relative file.
-  Without `add --to`, sources inside Home use their Home-relative path; sources
-  outside Home use their absolute path with the leading `/` removed. The same
-  default applies to list imports. Explicit targets override either default.
-- Application data defaults to `$HOME/.filetrail` on both macOS and Linux. The
-  `--data-dir` option overrides this location for all configuration, mappings,
-  synchronization state, locks, sockets, and logs. Use the same resolved data
-  directory when spawning the daemon or rendering system service definitions.
-- sync.rs reconciles current filesystem contents, records ownership and content
-  baselines, protects external destination edits, and copies without following
-  symlinks. Events are hints; periodic scans recover missed events.
-- state.rs persists synchronization state in `state.db` using bundled SQLite.
-  Ownership, baselines, conflicts, and the last sync timestamp live in separate
-  tables. Apply related changes in one transaction, updating only changed rows.
-  Ownership survives a source deletion so Git can still commit that deletion.
-  Conflicts may refer to files not yet owned by FileTrail.
-  Validate application_id and user_version before accessing a database; never
-  silently reset damaged or unknown schemas. Publish a new database only after
-  its initial transaction succeeds. Reads and dry runs must not create a database.
-  There is no legacy JSON state reader or migration path. Callers hold the shared
-  operation lock across a state read/modify/write sequence; SQLite also provides
-  transactional consistency for state readers and writers.
-- manifest.rs parses file-list lines as `source [target]` separated by whitespace.
-  Single/double quotes and escapes support spaces in either path; comments and
-  blank lines are allowed. Never execute a shell or expand variables in the list.
-  Reject extra fields, empty paths, and malformed quotes with a line-numbered
-  error, and validate the complete list before saving any mappings.
-- git.rs handles local status/diff/commit. Background sync never stages or commits.
-  A commit includes only previously synchronized, still-managed paths. Preexisting
-  staged changes cause a refusal, without changing the index.
-- daemon.rs owns native watching, periodic reconciliation, and the local socket.
-  All disk mutations share operation.lock; daemon.lock prevents duplicate daemons.
-  CLI config edits are atomic and picked up by the daemon without restarting it.
-- service.rs renders/installs user-level launchd or systemd definitions.
-- completion.rs installs explicitly requested Bash, Zsh, and Fish completion hooks.
-  Keep generation derived from the Clap command tree, including nested commands.
-  Generation and installation must work before init without creating application data.
-  Preserve existing shell configuration, symlinks, and permissions; replace only
-  FileTrail's marked block and refuse malformed markers. Respect ZDOTDIR and
-  XDG_CONFIG_HOME. Hooks invoke the absolute executable path with shell-specific
-  quoting, so upgrades at the same location update completion automatically.
-  Initialize Zsh with compinit -i: retain permission checks and skip insecure
-  completion directories without prompting. Do not bypass the audit with -u or
-  -C. Test safe and insecure fpath entries without a TTY.
-  install.sh wraps cargo install followed by completion installation. Never use
-  build.rs to modify shell configuration during builds. Test with isolated HOME,
-  ZDOTDIR, and XDG_CONFIG_HOME; never modify the developer's real shell profiles.
-- Default synchronization preserves deleted source files in the destination.
-  Opt-in deletion applies only to previously synchronized paths. A missing source
-  root directory must never trigger mass deletion.
-- Never permit repository-relative paths to escape via `..`, `.git`, or a
-  destination ancestor symlink. Do not overwrite external destination edits
-  unless the user explicitly requests conflict resolution for that path.
-- Default commit messages start with `filetrail: ` and list every selected file
-  change. Explicit user messages are preserved. No automatic commit or push.
+Core modules: `config.rs` manages mappings, `state.rs` persists sync state,
+`sync.rs` and `daemon.rs` handle synchronization, and `git.rs` handles Git operations.
+Consult the source and tests for implementation details.
+
+- CLI, daemon, and services share the same data directory and serialize mutations.
+- Keep sync destinations inside the configured repository. Never follow symlinks
+  outside it or modify `.git` through synchronization.
+- Protect external destination edits. Deletion is opt-in and limited to managed
+  files; an unavailable source directory must never trigger mass deletion.
+- Background sync never stages or commits. Explicit commits include only managed
+  changes and must preserve the user's existing staging.
+- Validate before writing, update state atomically, and keep dry runs read-only.
+  Never silently discard corrupt state.
+- Shell setup must preserve existing user configuration and safely quote paths.
 
 ## Using Filetrail as an agent
 

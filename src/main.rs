@@ -87,7 +87,7 @@ enum Commands {
     Diff {
         paths: Vec<String>,
     },
-    /// Commit managed changes; generates a filetrail: message by default.
+    /// Commit managed changes; generates a FileTrail: message by default.
     Commit {
         #[arg(short, long)]
         message: Option<String>,
@@ -159,7 +159,7 @@ fn execute(cli: Cli) -> Result<()> {
         if install {
             let paths = filetrail::completion::install(shell, &std::env::current_exe()?)?;
             for path in paths {
-                println!("Configured {}", path.display());
+                println!("Configured {}", filetrail::completion::display_path(&path));
             }
             println!("{shell} Tab completion installed. Open a new shell to activate it.");
         } else {

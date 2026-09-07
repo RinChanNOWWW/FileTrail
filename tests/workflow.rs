@@ -24,7 +24,7 @@ impl CompletionFixture {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         fs::create_dir(&home).unwrap();
-        let bin = temp.path().join("bin 'quoted' $cash \\files");
+        let bin = home.join("bin 'quoted' $cash \\files \"double\" `literal`");
         fs::create_dir(&bin).unwrap();
         let binary = bin.join("filetrail");
         fs::copy(env!("CARGO_BIN_EXE_filetrail"), &binary).unwrap();
@@ -93,7 +93,7 @@ fn completion_generation_includes_nested_commands_without_initialization() {
             assert!(script.contains(expected), "{shell}: missing {expected}");
         }
     }
-    assert_eq!(fs::read_dir(&f.home).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&f.home).unwrap().count(), 1);
 }
 
 #[test]
@@ -115,7 +115,10 @@ fn completion_installation_is_idempotent_and_preserves_existing_profiles() {
         ("zsh", vec![".zshrc"]),
         ("fish", vec![".config/fish/completions/filetrail.fish"]),
     ] {
-        assert!(f.install(shell).contains("Open a new shell"));
+        let output = f.install(shell);
+        assert!(output.contains("Open a new shell"));
+        assert!(output.contains("Configured $HOME/"));
+        assert!(!output.contains(f.home.to_str().unwrap()));
         let first: Vec<_> = names
             .iter()
             .map(|name| fs::read(f.home.join(name)).unwrap())
@@ -126,8 +129,10 @@ fn completion_installation_is_idempotent_and_preserves_existing_profiles() {
             assert_eq!(fs::read(&path).unwrap(), first);
             let content = fs::read_to_string(path).unwrap();
             assert!(content.starts_with(existing));
+            assert!(content.contains("\"$HOME/"));
+            assert!(!content.contains(f.home.to_str().unwrap()));
             assert_eq!(
-                content.matches("# >>> filetrail completions >>>").count(),
+                content.matches("# >>> FileTrail completions >>>").count(),
                 1
             );
         }
@@ -206,7 +211,7 @@ fn completion_installation_refuses_invalid_input_before_changing_profiles() {
         fs::read_to_string(f.home.join(".bashrc")).unwrap(),
         "# keep me\n"
     );
-    assert_eq!(fs::read_dir(&f.home).unwrap().count(), 2);
+    assert_eq!(fs::read_dir(&f.home).unwrap().count(), 3);
 }
 
 #[test]
@@ -311,6 +316,42 @@ fn fish_completion_autoloads_commands_options_and_paths() {
                 .any(|line| line.split('\t').next() == Some(expected)),
             "{line}: {output}\nstderr: {stderr}"
         );
+    }
+}
+
+#[test]
+fn completion_hooks_follow_home_after_relocation() {
+    let mut f = CompletionFixture::new();
+    for shell in ["bash", "zsh", "fish"] {
+        f.install(shell);
+    }
+    let binary_relative = f.binary.strip_prefix(&f.home).unwrap().to_owned();
+    let relocated = f.temp.path().join("new home 'quoted' $cash");
+    fs::rename(&f.home, &relocated).unwrap();
+    f.home = relocated;
+    f.binary = f.home.join(binary_relative);
+    for (shell, arguments) in [
+        ("bash", vec!["--noprofile", "-ic", "complete -p filetrail"]),
+        (
+            "zsh",
+            vec![
+                "-d",
+                "-ic",
+                "[[ ${_comps[filetrail]-} == _filetrail ]] && (( $+functions[_filetrail] ))",
+            ],
+        ),
+        ("fish", vec!["-c", "complete -C 'filetrail co'"]),
+    ] {
+        let result = f.command(shell).args(arguments).output().unwrap();
+        let output = output_text(result);
+        if shell == "fish" {
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line.split('\t').next() == Some("commit")),
+                "{output}"
+            );
+        }
     }
 }
 
@@ -586,7 +627,7 @@ fn default_commit_message_and_untracked_diff_include_files() {
     filetrail::git::commit(&f.store, None, &[]).unwrap();
     let repo = Repository::open(&f.repository).unwrap();
     let commit = repo.head().unwrap().peel_to_commit().unwrap();
-    assert!(commit.message().unwrap().starts_with("filetrail: "));
+    assert!(commit.message().unwrap().starts_with("FileTrail: "));
     assert!(commit.message().unwrap().contains("macos/config/a"));
     assert!(
         commit

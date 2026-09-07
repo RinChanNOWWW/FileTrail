@@ -53,7 +53,9 @@ For example, try `filetrail da<Tab>`, `filetrail daemon st<Tab>`, or
 
 Installation preserves existing shell configuration and is safe to repeat. It
 uses `.zshrc` (respecting `ZDOTDIR`), `.bashrc` and Bash's active login profile,
-or Fish's completion directory (respecting `XDG_CONFIG_HOME`). Completion stays
+or Fish's completion directory (respecting `XDG_CONFIG_HOME`). Home paths use
+`$HOME` in the installed hooks and command output, so your username is not embedded.
+Paths outside Home retain their absolute location. Completion stays
 in sync when you upgrade the executable at the same location. Run installation
 again if you move it. To remove completion, delete the marked FileTrail block
 from the configured files printed by the install command.
@@ -168,7 +170,7 @@ already staged. Set your Git name and email before your first commit.
 Without `-m`, FileTrail generates a message listing the selected changes:
 
 ```text
-filetrail: sync 3 files (+1 ~1 -1)
+FileTrail: sync 3 files (+1 ~1 -1)
 
 add "macos/.config/nvim/init.lua"
 delete "macos/.oldrc"

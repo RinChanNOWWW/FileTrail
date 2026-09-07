@@ -49,7 +49,8 @@ filetrail completions fish --install
 
 安装会保留已有 shell 配置，重复执行不会添加重复配置。配置位置为 `.zshrc`
 （遵循 `ZDOTDIR`）、`.bashrc` 和 Bash 当前使用的登录配置文件，或 Fish 的补全目录
-（遵循 `XDG_CONFIG_HOME`）。在相同位置升级可执行文件后，补全会同步更新；
+（遵循 `XDG_CONFIG_HOME`）。安装的补全配置和命令输出使用 `$HOME` 表示 Home 路径，
+不写入用户名；Home 以外的路径保留绝对位置。在相同位置升级可执行文件后，补全会同步更新；
 移动可执行文件后需重新安装补全。若要移除补全，删除安装命令所列配置文件中
 带有 FileTrail 标记的配置块即可。
 
@@ -155,7 +156,7 @@ filetrail commit -- macos/.zshrc
 不传 `-m` 时，FileTrail 会自动生成列出本次变化的消息：
 
 ```text
-filetrail: sync 3 files (+1 ~1 -1)
+FileTrail: sync 3 files (+1 ~1 -1)
 
 add "macos/.config/nvim/init.lua"
 delete "macos/.oldrc"
