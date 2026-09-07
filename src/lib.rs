@@ -3,6 +3,7 @@
 #[cfg(not(unix))]
 compile_error!("Filetrail currently supports macOS and Linux only");
 
+pub mod completion;
 pub mod config;
 pub mod daemon;
 pub mod git;

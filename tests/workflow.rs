@@ -10,8 +10,425 @@ use std::time::Instant;
 use filetrail::config::Config;
 use filetrail::config::Entry;
 use filetrail::config::Store;
+use fs2::FileExt;
 use git2::Repository;
 use tempfile::TempDir;
+
+struct CompletionFixture {
+    temp: TempDir,
+    home: PathBuf,
+    binary: PathBuf,
+}
+
+impl CompletionFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let bin = home.join("bin 'quoted' $cash \\files \"double\" `literal`");
+        fs::create_dir(&bin).unwrap();
+        let binary = bin.join("filetrail");
+        copy_executable(Path::new(env!("CARGO_BIN_EXE_filetrail")), &binary);
+        Self { temp, home, binary }
+    }
+
+    fn command(&self, executable: impl AsRef<std::ffi::OsStr>) -> Command {
+        // Fish only autoloads completions for commands it can resolve. Model an
+        // installed binary instead of depending on FileTrail in the user's PATH.
+        let mut paths = vec![self.binary.parent().unwrap().to_owned()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let mut command = Command::new(executable);
+        command
+            .current_dir(&self.home)
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("HOME", &self.home)
+            .env("ZDOTDIR", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("TERM", "xterm")
+            .env_remove("BASH_ENV")
+            .env_remove("ENV");
+        command
+    }
+
+    fn install(&self, shell: &str) -> String {
+        output_text(
+            self.command(&self.binary)
+                .env("SHELL", format!("/bin/{shell}"))
+                .args(["completions", "--install"])
+                .output()
+                .unwrap(),
+        )
+    }
+}
+
+fn copy_executable(source: &Path, target: &Path) {
+    let mut input = fs::File::open(source).unwrap();
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .unwrap();
+    std::io::copy(&mut input, &mut output).unwrap();
+    output
+        .set_permissions(input.metadata().unwrap().permissions())
+        .unwrap();
+
+    // A concurrent fork can inherit this writer until its exec closes it, even
+    // after we drop our descriptor (rust-lang/rust#114554). The exclusive lock
+    // belongs to that shared open-file description. Closing and reopening with
+    // a shared lock waits for every inherited writer, preventing ETXTBSY.
+    FileExt::lock_exclusive(&output).unwrap();
+    drop(output);
+    let reader = fs::File::open(target).unwrap();
+    FileExt::lock_shared(&reader).unwrap();
+}
+
+fn output_text(output: std::process::Output) -> String {
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn completion_fixtures_can_be_created_and_executed_concurrently() {
+    let start = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..8 {
+                    let f = CompletionFixture::new();
+                    assert!(f.install("bash").contains("Tab completion installed"));
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn completion_generation_includes_nested_commands_without_initialization() {
+    let f = CompletionFixture::new();
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let script = output_text(
+            f.command(&f.binary)
+                .args(["completions", shell])
+                .output()
+                .unwrap(),
+        );
+        for expected in [
+            "daemon",
+            "restart",
+            "service",
+            "uninstall",
+            "from",
+            "install",
+        ] {
+            assert!(script.contains(expected), "{shell}: missing {expected}");
+        }
+    }
+    assert_eq!(fs::read_dir(&f.home).unwrap().count(), 1);
+}
+
+#[test]
+fn completion_installation_is_idempotent_and_preserves_existing_profiles() {
+    let f = CompletionFixture::new();
+    let existing = "# user configuration\nexport FILETRAIL_TEST=preserved";
+    for name in [
+        ".bashrc",
+        ".bash_login",
+        ".zshrc",
+        ".config/fish/completions/filetrail.fish",
+    ] {
+        let path = f.home.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, existing).unwrap();
+    }
+    for (shell, names) in [
+        ("bash", vec![".bashrc", ".bash_login"]),
+        ("zsh", vec![".zshrc"]),
+        ("fish", vec![".config/fish/completions/filetrail.fish"]),
+    ] {
+        let output = f.install(shell);
+        assert!(output.contains("Open a new shell"));
+        assert!(output.contains("Configured $HOME/"));
+        assert!(!output.contains(f.home.to_str().unwrap()));
+        let first: Vec<_> = names
+            .iter()
+            .map(|name| fs::read(f.home.join(name)).unwrap())
+            .collect();
+        f.install(shell);
+        for (name, first) in names.iter().zip(first) {
+            let path = f.home.join(name);
+            assert_eq!(fs::read(&path).unwrap(), first);
+            let content = fs::read_to_string(path).unwrap();
+            assert!(content.starts_with(existing));
+            assert!(content.contains("\"$HOME/"));
+            assert!(!content.contains(f.home.to_str().unwrap()));
+            assert_eq!(
+                content.matches("# >>> FileTrail completions >>>").count(),
+                1
+            );
+        }
+    }
+    assert!(!f.home.join(".bash_profile").exists());
+    assert!(!f.home.join(".filetrail").exists());
+}
+
+#[test]
+fn completion_installation_respects_overrides_symlinks_and_permissions() {
+    let f = CompletionFixture::new();
+    let dotdir = f.home.join("zsh config");
+    fs::create_dir(&dotdir).unwrap();
+    let target = f.home.join("tracked-zshrc");
+    fs::write(&target, "# tracked dotfile\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+    symlink(&target, dotdir.join(".zshrc")).unwrap();
+    output_text(
+        f.command(&f.binary)
+            .env("ZDOTDIR", &dotdir)
+            .args(["completions", "zsh", "--install"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        fs::symlink_metadata(dotdir.join(".zshrc"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert!(
+        fs::read_to_string(target)
+            .unwrap()
+            .starts_with("# tracked dotfile\n")
+    );
+    let xdg = f.home.join("fish config");
+    output_text(
+        f.command(&f.binary)
+            .env("XDG_CONFIG_HOME", &xdg)
+            .args(["completions", "fish", "--install"])
+            .output()
+            .unwrap(),
+    );
+    assert!(xdg.join("fish/completions/filetrail.fish").is_file());
+    assert!(!f.home.join(".zshrc").exists());
+    assert!(!f.home.join(".config").exists());
+}
+
+#[test]
+fn completion_installation_refuses_invalid_input_before_changing_profiles() {
+    let f = CompletionFixture::new();
+    fs::write(f.home.join(".bashrc"), "# keep me\n").unwrap();
+    fs::write(
+        f.home.join(".bash_profile"),
+        "# >>> filetrail completions >>>\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["completions", "bash", "--install"],
+        vec!["completions", "elvish", "--install"],
+        vec!["completions", "--install"],
+    ] {
+        let output = f
+            .command(&f.binary)
+            .env_remove("SHELL")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+    assert_eq!(
+        fs::read_to_string(f.home.join(".bashrc")).unwrap(),
+        "# keep me\n"
+    );
+    assert_eq!(fs::read_dir(&f.home).unwrap().count(), 3);
+}
+
+#[test]
+fn bash_completion_loads_and_completes_commands_options_and_paths() {
+    let f = CompletionFixture::new();
+    f.install("bash");
+    fs::write(f.home.join("example.txt"), "").unwrap();
+    for (words, index, expected) in [
+        ("filetrail co", "1", "commit"),
+        ("filetrail daemon st", "2", "start"),
+        ("filetrail service un", "2", "uninstall"),
+        ("filetrail add --f", "2", "--from"),
+        ("filetrail add --from ex", "3", "example.txt"),
+    ] {
+        let script = format!(
+            "complete -p filetrail >/dev/null || exit 1; COMP_WORDS=({words}); COMP_CWORD={index}; _filetrail filetrail \"${{COMP_WORDS[COMP_CWORD]}}\" \"${{COMP_WORDS[COMP_CWORD-1]}}\"; printf '%s\\n' \"${{COMPREPLY[@]}}\""
+        );
+        let output = output_text(
+            f.command("bash")
+                .args(["--noprofile", "-ic", &script])
+                .output()
+                .unwrap(),
+        );
+        assert!(
+            output.lines().any(|line| line == expected),
+            "{words}: {output}"
+        );
+    }
+}
+
+#[test]
+fn zsh_completion_registers_with_and_without_existing_compinit() {
+    for insecure in [false, true] {
+        for prefix in ["", "autoload -Uz compinit\ncompinit -i\n"] {
+            let f = CompletionFixture::new();
+            let functions = f.temp.path().join("completion functions");
+            fs::create_dir(&functions).unwrap();
+            fs::write(
+                functions.join("_filetrail_fixture"),
+                "#compdef filetrail-fixture\n",
+            )
+            .unwrap();
+            fs::set_permissions(
+                &functions,
+                fs::Permissions::from_mode(if insecure { 0o777 } else { 0o755 }),
+            )
+            .unwrap();
+            fs::write(
+                f.home.join(".zshrc"),
+                format!("fpath=(\"$FILETRAIL_TEST_FPATH\" $fpath)\n{prefix}"),
+            )
+            .unwrap();
+            f.install("zsh");
+            // No TTY: an audit prompt must not abort completion initialization.
+            // Safe fixture completions should load; unsafe ones must be ignored.
+            let output = f.command("zsh")
+                .env("FILETRAIL_TEST_FPATH", &functions)
+                .env("FILETRAIL_TEST_COMPLETION", if insecure { "" } else { "_filetrail_fixture" })
+                .args([
+                    "-d",
+                    "-ic",
+                    "[[ ${_comps[filetrail]-} == _filetrail && ${_comps[filetrail-fixture]-} == $FILETRAIL_TEST_COMPLETION ]] && (( $+functions[_filetrail] ))",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output_text(output);
+        }
+    }
+}
+
+#[test]
+fn fish_completion_autoloads_commands_options_and_paths() {
+    let f = CompletionFixture::new();
+    f.install("fish");
+    let resolved = output_text(
+        f.command("fish")
+            .args(["-c", "command -s filetrail"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(resolved.trim_end(), f.binary.to_str().unwrap());
+    fs::write(f.home.join("example.txt"), "").unwrap();
+    for (line, expected) in [
+        ("filetrail co", "commit"),
+        ("filetrail daemon st", "start"),
+        ("filetrail service un", "uninstall"),
+        ("filetrail add --f", "--from"),
+        ("filetrail add --from ex", "example.txt"),
+    ] {
+        let script = format!("complete -C '{line}'");
+        let result = f.command("fish").args(["-c", &script]).output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+        let output = output_text(result);
+        assert!(
+            output
+                .lines()
+                .any(|line| line.split('\t').next() == Some(expected)),
+            "{line}: {output}\nstderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn completion_hooks_follow_home_after_relocation() {
+    let mut f = CompletionFixture::new();
+    for shell in ["bash", "zsh", "fish"] {
+        f.install(shell);
+    }
+    let binary_relative = f.binary.strip_prefix(&f.home).unwrap().to_owned();
+    let relocated = f.temp.path().join("new home 'quoted' $cash");
+    fs::rename(&f.home, &relocated).unwrap();
+    f.home = relocated;
+    f.binary = f.home.join(binary_relative);
+    for (shell, arguments) in [
+        ("bash", vec!["--noprofile", "-ic", "complete -p filetrail"]),
+        (
+            "zsh",
+            vec![
+                "-d",
+                "-ic",
+                "[[ ${_comps[filetrail]-} == _filetrail ]] && (( $+functions[_filetrail] ))",
+            ],
+        ),
+        ("fish", vec!["-c", "complete -C 'filetrail co'"]),
+    ] {
+        let result = f.command(shell).args(arguments).output().unwrap();
+        let output = output_text(result);
+        if shell == "fish" {
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line.split('\t').next() == Some("commit")),
+                "{output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn install_wrapper_uses_cargo_then_installs_completion_only_on_success() {
+    let f = CompletionFixture::new();
+    let fake_bin = f.temp.path().join("fake-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let cargo = fake_bin.join("cargo");
+    // Use a checked-in script so concurrent forks cannot inherit a writer for it.
+    symlink(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cargo.sh"),
+        &cargo,
+    )
+    .unwrap();
+    let root = f.temp.path().join("install root");
+    let run = |exit_code: &str| {
+        f.command("sh")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh"))
+            .arg("zsh")
+            .env("CARGO_INSTALL_ROOT", &root)
+            .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+            .env("FILETRAIL_TEST_BINARY", &f.binary)
+            .env("FILETRAIL_TEST_CARGO_EXIT", exit_code)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(run("19").status.code(), Some(19));
+    assert!(!f.home.join(".zshrc").exists());
+    output_text(run("0"));
+    assert!(root.join("bin/filetrail").is_file());
+    assert!(
+        fs::read_to_string(f.home.join(".zshrc"))
+            .unwrap()
+            .contains(&format!("{}/bin/filetrail", root.display()))
+    );
+}
 
 struct Fixture {
     _temp: TempDir,
@@ -254,7 +671,7 @@ fn default_commit_message_and_untracked_diff_include_files() {
     filetrail::git::commit(&f.store, None, &[]).unwrap();
     let repo = Repository::open(&f.repository).unwrap();
     let commit = repo.head().unwrap().peel_to_commit().unwrap();
-    assert!(commit.message().unwrap().starts_with("filetrail: "));
+    assert!(commit.message().unwrap().starts_with("FileTrail: "));
     assert!(commit.message().unwrap().contains("macos/config/a"));
     assert!(
         commit

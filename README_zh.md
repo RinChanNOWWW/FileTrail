@@ -17,6 +17,49 @@ cargo install --path . --locked
 filetrail --help
 ```
 
+如需一次完成 FileTrail 安装和 Tab 补全配置：
+
+```sh
+./install.sh
+```
+
+脚本根据 `$SHELL` 识别 Bash、Zsh 或 Fish，也可以用 `./install.sh zsh` 显式指定。
+它先通过 Cargo 安装，再配置所选 shell 的补全，完成后重新打开 shell 即可。
+安装根目录默认为 `${CARGO_HOME:-$HOME/.cargo}`，可通过 `CARGO_INSTALL_ROOT` 覆盖。
+
+## Tab 补全
+
+如果使用 `cargo install` 安装 FileTrail，执行以下命令启用补全：
+
+```sh
+filetrail completions --install
+```
+
+该命令根据 `$SHELL` 识别 shell，也可以显式指定：
+
+```sh
+filetrail completions zsh --install
+filetrail completions bash --install
+filetrail completions fish --install
+```
+
+执行你所用 shell 对应的命令，然后重新打开 shell。Tab 可以补全子命令
+（包括 `daemon` 和 `service` 的操作）、选项及文件路径。例如：
+`filetrail da<Tab>`、`filetrail daemon st<Tab>`、`filetrail add --f<Tab>`。
+
+安装会保留已有 shell 配置，重复执行不会添加重复配置。配置位置为 `.zshrc`
+（遵循 `ZDOTDIR`）、`.bashrc` 和 Bash 当前使用的登录配置文件，或 Fish 的补全目录
+（遵循 `XDG_CONFIG_HOME`）。安装的补全配置和命令输出使用 `$HOME` 表示 Home 路径，
+不写入用户名；Home 以外的路径保留绝对位置。在相同位置升级可执行文件后，补全会同步更新；
+移动可执行文件后需重新安装补全。若要移除补全，删除安装命令所列配置文件中
+带有 FileTrail 标记的配置块即可。
+
+如需手动配置，可省略 `--install`，只输出补全脚本：
+
+```sh
+filetrail completions zsh
+```
+
 ## 开始使用
 
 ```sh
@@ -113,7 +156,7 @@ filetrail commit -- macos/.zshrc
 不传 `-m` 时，FileTrail 会自动生成列出本次变化的消息：
 
 ```text
-filetrail: sync 3 files (+1 ~1 -1)
+FileTrail: sync 3 files (+1 ~1 -1)
 
 add "macos/.config/nvim/init.lua"
 delete "macos/.oldrc"
@@ -184,7 +227,6 @@ filetrail doctor
 filetrail logs --follow
 filetrail --help
 filetrail add --help
-filetrail completions zsh
 ```
 
 开发说明见 [AGENTS.md](AGENTS.md)。

@@ -213,7 +213,7 @@ pub fn default_message(changes: &[Change]) -> String {
     }
     details.sort();
     format!(
-        "filetrail: sync {} files (+{added} ~{modified} -{deleted})\n\n{}",
+        "FileTrail: sync {} files (+{added} ~{modified} -{deleted})\n\n{}",
         changes.len(),
         details.join("\n")
     )
@@ -328,7 +328,7 @@ mod tests {
         ]);
         assert_eq!(
             message,
-            "filetrail: sync 3 files (+1 ~1 -1)\n\nadd \"a\"\ndelete \"z\"\nmodify \"m\\nname\""
+            "FileTrail: sync 3 files (+1 ~1 -1)\n\nadd \"a\"\ndelete \"z\"\nmodify \"m\\nname\""
         );
     }
 }

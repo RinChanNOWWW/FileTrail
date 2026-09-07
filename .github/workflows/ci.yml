@@ -1,9 +1,7 @@
 name: CI
 
 on:
-  push:
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -50,6 +48,12 @@ jobs:
         run: cargo check --locked --all-targets
       - name: Clippy (warnings are errors)
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Install shells for completion tests (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - name: Install Fish for completion tests (macOS)
+        if: runner.os == 'macOS'
+        run: command -v fish >/dev/null || brew install fish
       - name: Unit and integration tests
         run: cargo test --locked --all-targets
       - name: Documentation tests

@@ -23,7 +23,7 @@ use filetrail::config::Store;
 )]
 struct Cli {
     /// Store configuration, mappings, synchronization state, sockets, and logs here [default: $HOME/.filetrail].
-    #[arg(long, global = true)]
+    #[arg(long, global = true, value_hint = clap::ValueHint::DirPath)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
@@ -33,6 +33,7 @@ struct Cli {
 enum Commands {
     /// Set the target repository and its optional platform subdirectory.
     Init {
+        #[arg(value_hint = clap::ValueHint::DirPath)]
         repository: PathBuf,
         /// Repository-relative destination root, e.g. macos or linux.
         #[arg(long, default_value = ".")]
@@ -46,7 +47,7 @@ enum Commands {
         #[arg(long, conflicts_with = "from")]
         to: Option<PathBuf>,
         /// Import source [target] lines separated by spaces; quote paths containing spaces.
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         from: Option<PathBuf>,
         /// Propagate source deletions for files previously synchronized.
         #[arg(long)]
@@ -86,7 +87,7 @@ enum Commands {
     Diff {
         paths: Vec<String>,
     },
-    /// Commit managed changes; generates a filetrail: message by default.
+    /// Commit managed changes; generates a FileTrail: message by default.
     Commit {
         #[arg(short, long)]
         message: Option<String>,
@@ -105,9 +106,14 @@ enum Commands {
     },
     /// Validate configuration, Git state, source availability, and mappings.
     Doctor,
-    /// Generate shell completion definitions.
+    /// Generate completions or install Tab completion for Bash, Zsh, or Fish.
     Completions {
-        shell: Shell,
+        /// Shell to generate/install for; --install defaults to $SHELL.
+        #[arg(required_unless_present = "install")]
+        shell: Option<Shell>,
+        /// Configure shell startup files (safe to repeat); open a new shell afterward.
+        #[arg(long)]
+        install: bool,
     },
 }
 
@@ -146,13 +152,24 @@ fn main() {
 }
 
 fn execute(cli: Cli) -> Result<()> {
-    if let Commands::Completions { shell } = cli.command {
-        clap_complete::generate(
-            shell,
-            &mut Cli::command(),
-            "filetrail",
-            &mut std::io::stdout(),
-        );
+    if let Commands::Completions { shell, install } = cli.command {
+        let shell = shell.or_else(Shell::from_env).context(
+            "cannot detect shell; specify bash, zsh, or fish, e.g. completions zsh --install",
+        )?;
+        if install {
+            let paths = filetrail::completion::install(shell, &std::env::current_exe()?)?;
+            for path in paths {
+                println!("Configured {}", filetrail::completion::display_path(&path));
+            }
+            println!("{shell} Tab completion installed. Open a new shell to activate it.");
+        } else {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "filetrail",
+                &mut std::io::stdout(),
+            );
+        }
         return Ok(());
     }
     let store = Store::new(data_root(cli.data_dir)?)?;
