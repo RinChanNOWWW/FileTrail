@@ -10,6 +10,7 @@ use std::time::Instant;
 use filetrail::config::Config;
 use filetrail::config::Entry;
 use filetrail::config::Store;
+use fs2::FileExt;
 use git2::Repository;
 use tempfile::TempDir;
 
@@ -27,7 +28,7 @@ impl CompletionFixture {
         let bin = home.join("bin 'quoted' $cash \\files \"double\" `literal`");
         fs::create_dir(&bin).unwrap();
         let binary = bin.join("filetrail");
-        fs::copy(env!("CARGO_BIN_EXE_filetrail"), &binary).unwrap();
+        copy_executable(Path::new(env!("CARGO_BIN_EXE_filetrail")), &binary);
         Self { temp, home, binary }
     }
 
@@ -62,14 +63,53 @@ impl CompletionFixture {
     }
 }
 
+fn copy_executable(source: &Path, target: &Path) {
+    let mut input = fs::File::open(source).unwrap();
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .unwrap();
+    std::io::copy(&mut input, &mut output).unwrap();
+    output
+        .set_permissions(input.metadata().unwrap().permissions())
+        .unwrap();
+
+    // A concurrent fork can inherit this writer until its exec closes it, even
+    // after we drop our descriptor (rust-lang/rust#114554). The exclusive lock
+    // belongs to that shared open-file description. Closing and reopening with
+    // a shared lock waits for every inherited writer, preventing ETXTBSY.
+    FileExt::lock_exclusive(&output).unwrap();
+    drop(output);
+    let reader = fs::File::open(target).unwrap();
+    FileExt::lock_shared(&reader).unwrap();
+}
+
 fn output_text(output: std::process::Output) -> String {
     assert!(
         output.status.success(),
-        "stdout: {}\nstderr: {}",
+        "status: {}\nstdout: {}\nstderr: {}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn completion_fixtures_can_be_created_and_executed_concurrently() {
+    let start = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                start.wait();
+                for _ in 0..8 {
+                    let f = CompletionFixture::new();
+                    assert!(f.install("bash").contains("Tab completion installed"));
+                }
+            });
+        }
+    });
 }
 
 #[test]
@@ -361,23 +401,27 @@ fn install_wrapper_uses_cargo_then_installs_completion_only_on_success() {
     let fake_bin = f.temp.path().join("fake-bin");
     fs::create_dir(&fake_bin).unwrap();
     let cargo = fake_bin.join("cargo");
-    fs::write(&cargo, "#!/bin/sh\nexit 19\n").unwrap();
-    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    // Use a checked-in script so concurrent forks cannot inherit a writer for it.
+    symlink(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cargo.sh"),
+        &cargo,
+    )
+    .unwrap();
     let root = f.temp.path().join("install root");
-    let run = || {
+    let run = |exit_code: &str| {
         f.command("sh")
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/install.sh"))
             .arg("zsh")
             .env("CARGO_INSTALL_ROOT", &root)
             .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
             .env("FILETRAIL_TEST_BINARY", &f.binary)
+            .env("FILETRAIL_TEST_CARGO_EXIT", exit_code)
             .output()
             .unwrap()
     };
-    assert_eq!(run().status.code(), Some(19));
+    assert_eq!(run("19").status.code(), Some(19));
     assert!(!f.home.join(".zshrc").exists());
-    fs::write(&cargo, "#!/bin/sh\nset -eu\n[ \"$1 $2 $3 $4 $5\" = 'install --path . --locked --root' ]\nmkdir -p \"$6/bin\"\ncp \"$FILETRAIL_TEST_BINARY\" \"$6/bin/filetrail\"\n").unwrap();
-    output_text(run());
+    output_text(run("0"));
     assert!(root.join("bin/filetrail").is_file());
     assert!(
         fs::read_to_string(f.home.join(".zshrc"))
