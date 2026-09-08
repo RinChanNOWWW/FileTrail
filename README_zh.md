@@ -75,23 +75,58 @@ Linux 上使用 `--subdir linux`；省略 `--subdir` 则保存到仓库根目录
 
 ## 选择保存位置
 
-HOME 内的来源保留相对 HOME 的路径；HOME 外的来源保留绝对路径层级，去掉开头的
-`/`。使用 `--to` 可以自定义目标位置，它相对于 `init` 时选择的子目录。
+Home 内的来源保存在 `__HOME__` 下，保留相对 Home 的路径；其他来源保存在
+`__ROOT__` 下，保留去掉开头 `/` 的绝对路径层级。这两个目录位于 `init` 指定的
+子目录中；未指定子目录时，直接位于仓库根目录。
 
-| 来源 | 子目录 | 目标 | 仓库中的文件 |
-| --- | --- | --- | --- |
-| `~/.zshrc` | `macos` | 默认 | `macos/.zshrc` |
-| `~/.config/nvim` | `linux` | 默认 | `linux/.config/nvim/init.lua` |
-| `/opt/scripts/build.sh` | `macos` | 默认 | `macos/opt/scripts/build.sh` |
-| `/opt/scripts` | `macos` | `scripts` | `macos/scripts/build.sh` |
+| 来源 | 子目录 | 仓库中的文件 |
+| --- | --- | --- |
+| `~/.zshrc` | `macos` | `macos/__HOME__/.zshrc` |
+| `~/.config/nvim` | `linux` | `linux/__HOME__/.config/nvim/init.lua` |
+| `/opt/scripts/build.sh` | `macos` | `macos/__ROOT__/opt/scripts/build.sh` |
+| `/opt/scripts` | 不指定 | `__ROOT__/opt/scripts/build.sh` |
+
+恢复时，`__HOME__` 对应当前用户的 Home，`__ROOT__` 对应 `/`。
+不支持自定义目标路径，保留来源路径才能明确原始位置。`__HOME__` 和 `__ROOT__`
+为保留名称，不能作为 `--subdir` 的路径组成部分。
 
 ```sh
-filetrail add /opt/scripts --to scripts
-filetrail add ~/notes --to notes --exclude '**/*.tmp'
+filetrail add /opt/scripts
+filetrail add ~/notes --exclude '**/*.tmp'
 ```
 
 目录默认递归监听，排除规则相对于来源根目录。相对来源路径以当前目录为基准，
 父目录中的符号链接会解析为实际路径。来源、目标和应用数据目录不能相互重叠。
+
+## 更换目标或重新初始化
+
+切换仓库时保留监听项、排除规则和删除设置：
+
+```sh
+filetrail retarget ~/new-dotfiles
+filetrail retarget ~/new-dotfiles --subdir linux
+filetrail retarget ~/new-dotfiles --subdir . # 保存到仓库根目录
+```
+
+省略 `--subdir` 时保留当前子目录。指定当前仓库也可以仅更换子目录。
+FileTrail 会在需要时创建仓库，并立即将已启用的监听项同步到新位置。
+后台任务会继续使用新目标，并保持原来的暂停或运行状态。
+
+旧文件和 Git 历史保留在原处，不会迁移或删除。新目标已有的不同内容会保留并报告为冲突，
+由你决定如何处理。即使首次同步报告冲突，目标也已经切换；此时 `conflicts` 和 `resolve`
+针对的是新仓库。
+
+不再使用某个配置，或需要从头初始化时：
+
+```sh
+filetrail deinit
+filetrail init ~/another-repository --subdir macos
+```
+
+`deinit` 会停止后台任务、卸载该配置已注册的开机启动服务，并清除配置与同步记录。
+源文件、仓库、Git 历史、日志和 shell 补全都会保留，可以安全地重复执行。
+重新初始化后，需要再次添加监听项并启动后台任务或安装服务。
+如果使用了自定义数据目录，请传入相同的 `--data-dir`。
 
 ## 从列表批量添加
 
@@ -99,16 +134,16 @@ filetrail add ~/notes --to notes --exclude '**/*.tmp'
 filetrail add --from ./files.txt
 ```
 
-每行写成 `source` 或 `source target`，用空格分隔。路径中包含空格时，使用单引号
-或双引号包住。目标位置可选，省略时使用前面介绍的默认规则。
+每行填写一个来源路径，包含空格时使用单引号或双引号包住。
+不支持用于自定义目标的第二列。
 
 ```text
-# source [target]
+# source
 ~/.zshrc
 ~/.config/nvim
-/opt/scripts scripts
-"~/My Notes" "notes backup"
-'./local scripts' 'scripts backup'
+/opt/scripts
+"~/My Notes"
+'./local scripts'
 ```
 
 相对来源路径以列表文件所在目录为基准，支持空行和 `#` 注释。HOME 路径使用 `~`；
@@ -132,7 +167,7 @@ filetrail sync --dry-run
 默认情况下，源文件删除后仍保留目标文件。添加来源时可开启同步删除：
 
 ```sh
-filetrail add ~/scripts --to scripts --delete
+filetrail add ~/scripts --delete
 ```
 
 只会删除以前成功同步过的文件。如果整个来源目录不可用，FileTrail 会保留目标
@@ -144,10 +179,10 @@ filetrail add ~/scripts --to scripts --delete
 ```sh
 filetrail status
 filetrail diff
-filetrail diff -- macos/.config/nvim
+filetrail diff -- macos/__HOME__/.config/nvim
 filetrail commit
 filetrail commit -m 'Update shell configuration'
-filetrail commit -- macos/.zshrc
+filetrail commit -- macos/__HOME__/.zshrc
 ```
 
 后台不会自动提交或推送。`diff` 包含新增文件的内容；`commit` 只提交受管理的文件，
@@ -158,9 +193,9 @@ filetrail commit -- macos/.zshrc
 ```text
 FileTrail: sync 3 files (+1 ~1 -1)
 
-add "macos/.config/nvim/init.lua"
-delete "macos/.oldrc"
-modify "macos/.zshrc"
+add "macos/__HOME__/.config/nvim/init.lua"
+delete "macos/__HOME__/.oldrc"
+modify "macos/__HOME__/.zshrc"
 ```
 
 检查期间需要保持目标内容稳定，可以暂停自动同步：
@@ -182,7 +217,7 @@ FileTrail 会报告冲突。明确希望使用来源版本时执行：
 
 ```sh
 filetrail conflicts
-filetrail resolve macos/.zshrc --use-source
+filetrail resolve macos/__HOME__/.zshrc --use-source
 ```
 
 也可以自行将两份文件改为相同内容，再运行 `filetrail sync`。仓库正在进行

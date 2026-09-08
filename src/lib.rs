@@ -7,6 +7,7 @@ pub mod completion;
 pub mod config;
 pub mod daemon;
 pub mod git;
+pub mod lifecycle;
 pub mod manifest;
 pub mod service;
 mod state;

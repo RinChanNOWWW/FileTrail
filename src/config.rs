@@ -76,6 +76,7 @@ impl Store {
     pub fn lock(&self) -> Result<File> {
         let file = self.lock_file("operation.lock")?;
         fs2::FileExt::lock_exclusive(&file)?;
+        crate::lifecycle::recover_retarget(self)?;
         Ok(file)
     }
 
@@ -110,7 +111,7 @@ impl Store {
         crate::state::load(&self.root)
     }
 
-    fn validate_layout(&self, config: &Config) -> Result<()> {
+    pub(crate) fn validate_layout(&self, config: &Config) -> Result<()> {
         if self.root.starts_with(&config.repository) || config.repository.starts_with(&self.root) {
             bail!("repository and data directory must not overlap");
         }
@@ -149,7 +150,14 @@ impl Config {
             bail!("repository must be absolute");
         }
         relative(&self.subdir)?;
+        if self.subdir.components().any(|part| {
+            let name = part.as_os_str().to_string_lossy();
+            name.eq_ignore_ascii_case("__HOME__") || name.eq_ignore_ascii_case("__ROOT__")
+        }) {
+            bail!("subdirectory must not contain the reserved __HOME__ or __ROOT__ names");
+        }
         crate::sync::exclusions(&self.exclude)?;
+        let home = home_dir()?;
         for (i, entry) in self.entries.iter().enumerate() {
             let normalized_target = relative(&entry.target)?;
             if normalized_target.as_os_str().is_empty()
@@ -160,6 +168,12 @@ impl Config {
                     .any(|part| matches!(part, Component::ParentDir))
             {
                 bail!("invalid source or target for entry {}", entry.id);
+            }
+            if normalized_target != default_target(&entry.source, &home)? {
+                bail!(
+                    "entry {} does not use the __HOME__/__ROOT__ layout; initialize a new data directory and re-add the source",
+                    entry.id
+                );
             }
             crate::sync::key(&entry.source)?;
             crate::sync::key(&entry.target)?;
@@ -241,15 +255,21 @@ pub fn expand(path: &Path, base: &Path) -> Result<PathBuf> {
     ))
 }
 
-/// Map Home files relative to Home, and other files relative to the filesystem root.
+pub fn home_dir() -> Result<PathBuf> {
+    Ok(fs::canonicalize(
+        dirs::home_dir().context("cannot determine home directory")?,
+    )?)
+}
+
+/// Encode the restoration base in the destination without renaming the source.
 pub fn default_target(source: &Path, home: &Path) -> Result<PathBuf> {
     if !source.is_absolute() || !home.is_absolute() {
         bail!("source and Home paths must be absolute");
     }
-    let target = source
-        .strip_prefix(home)
-        .or_else(|_| source.strip_prefix("/"))?;
-    relative(target)
+    match source.strip_prefix(home) {
+        Ok(path) => Ok(Path::new("__HOME__").join(relative(path)?)),
+        Err(_) => Ok(Path::new("__ROOT__").join(relative(source.strip_prefix("/")?)?)),
+    }
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -259,6 +279,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|error| error.error)?;
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -274,11 +295,15 @@ mod tests {
     fn default_targets_preserve_home_relative_and_external_absolute_paths() {
         let home = Path::new("/home/alice");
         for (source, expected) in [
-            ("/home/alice/.zshrc", ".zshrc"),
-            ("/home/alice/.config/nvim", ".config/nvim"),
-            ("/opt/scripts/build.sh", "opt/scripts/build.sh"),
-            ("/opt/scripts", "opt/scripts"),
-            ("/home/alice-other/settings", "home/alice-other/settings"),
+            ("/home/alice/.zshrc", "__HOME__/.zshrc"),
+            ("/home/alice/.config/nvim", "__HOME__/.config/nvim"),
+            ("/home/alice", "__HOME__"),
+            ("/opt/scripts/build.sh", "__ROOT__/opt/scripts/build.sh"),
+            ("/opt/scripts", "__ROOT__/opt/scripts"),
+            (
+                "/home/alice-other/settings",
+                "__ROOT__/home/alice-other/settings",
+            ),
         ] {
             assert_eq!(
                 default_target(Path::new(source), home).unwrap(),

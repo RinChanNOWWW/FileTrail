@@ -56,11 +56,16 @@ filetrail add ~/.config/nvim
 filetrail daemon start
 ```
 
-On Linux, use `--subdir linux`, or omit it to write at the repository root. An
-`add --to` path is relative to that configured subdirectory; paths passed to
-`diff`, `commit`, and `resolve` are relative to the repository root.
-For example, `filetrail add /opt/scripts/build.sh` with `--subdir macos` configured
-stores `macos/opt/scripts/build.sh`; no explicit target is required.
+On Linux, use `--subdir linux`, or omit it to put the reserved directories at the
+repository root. Home sources go under `__HOME__`; external sources go under
+`__ROOT__`, preserving their original relative paths. Custom targets are not
+supported. Paths passed to `diff`, `commit`, and `resolve` are repository-relative.
+For example, `/opt/scripts/build.sh` with `--subdir macos` is stored at
+`macos/__ROOT__/opt/scripts/build.sh`.
+
+Use `retarget <repository> [--subdir <path>]` to change the destination while keeping
+sources; omitting `--subdir` preserves its current value. `deinit` stops the daemon,
+uninstalls its service, and forgets the profile while keeping sources and repositories.
 
 Keep both READMEs focused on how to use the product. Database schemas, state-file
 layouts, internal locking/hashing details, toolchain versions, and formatter

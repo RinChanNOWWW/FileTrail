@@ -129,6 +129,10 @@ pub fn install(store: &Store) -> Result<String> {
     Ok(format!("installed {}", location.display()))
 }
 
+pub fn is_installed(store: &Store) -> Result<bool> {
+    Ok(location(store)?.try_exists()?)
+}
+
 pub fn uninstall(store: &Store) -> Result<String> {
     let location = location(store)?;
     if !location.exists() {

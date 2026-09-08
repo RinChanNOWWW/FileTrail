@@ -127,6 +127,8 @@ fn completion_generation_includes_nested_commands_without_initialization() {
             "restart",
             "service",
             "uninstall",
+            "retarget",
+            "deinit",
             "from",
             "install",
         ] {
@@ -459,7 +461,12 @@ impl Fixture {
         config.entries.push(Entry {
             id: 1,
             source: fs::canonicalize(&source).unwrap(),
-            target: "config".into(),
+            target: Path::new("__ROOT__").join(
+                fs::canonicalize(&source)
+                    .unwrap()
+                    .strip_prefix("/")
+                    .unwrap(),
+            ),
             directory: true,
             enabled: true,
             delete,
@@ -480,12 +487,25 @@ impl Fixture {
         fs::write(path, content).unwrap();
     }
 
-    fn target(&self, name: &str) -> PathBuf {
+    fn key(&self, name: &str) -> String {
         let config = self.store.config().unwrap();
-        self.repository
-            .join(&config.subdir)
-            .join("config")
+        Path::new(&config.subdir)
+            .join("__ROOT__")
+            .join(
+                fs::canonicalize(self.source.parent().unwrap())
+                    .unwrap()
+                    .join("source")
+                    .strip_prefix("/")
+                    .unwrap(),
+            )
             .join(name)
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_owned()
+    }
+
+    fn target(&self, name: &str) -> PathBuf {
+        self.repository.join(self.key(name))
     }
 
     fn sync(&self) {
@@ -533,7 +553,12 @@ fn dry_run_does_not_write_files_or_state() {
     let f = Fixture::new("", false);
     f.write("a", "one");
     let report = filetrail::sync::run(&f.store, true, None).unwrap();
-    assert!(report.actions.iter().any(|line| line == "add config/a"));
+    assert!(
+        report
+            .actions
+            .iter()
+            .any(|line| line == &format!("add {}", f.key("a")))
+    );
     assert!(!f.target("a").exists());
     assert!(!f.store.root.join("state.db").exists());
 }
@@ -548,7 +573,7 @@ fn first_sync_and_external_edits_are_protected_and_resolvable() {
     assert_eq!(report.errors.len(), 1);
     assert_eq!(fs::read_to_string(f.target("a")).unwrap(), "existing");
     assert!(
-        filetrail::sync::run(&f.store, false, Some(Path::new("linux/config/a")))
+        filetrail::sync::run(&f.store, false, Some(Path::new(&f.key("a"))))
             .unwrap()
             .errors
             .is_empty()
@@ -650,7 +675,8 @@ fn destination_symlink_ancestors_cannot_escape_repository() {
     f.write("a", "one");
     let outside = f._temp.path().join("outside");
     fs::create_dir(&outside).unwrap();
-    symlink(&outside, f.repository.join("config")).unwrap();
+    fs::create_dir_all(f.target("").parent().unwrap()).unwrap();
+    symlink(&outside, f.target("")).unwrap();
     assert!(
         !filetrail::sync::run(&f.store, false, None)
             .unwrap()
@@ -672,7 +698,7 @@ fn default_commit_message_and_untracked_diff_include_files() {
     let repo = Repository::open(&f.repository).unwrap();
     let commit = repo.head().unwrap().peel_to_commit().unwrap();
     assert!(commit.message().unwrap().starts_with("FileTrail: "));
-    assert!(commit.message().unwrap().contains("macos/config/a"));
+    assert!(commit.message().unwrap().contains(&f.key("a")));
     assert!(
         commit
             .tree()
@@ -683,14 +709,14 @@ fn default_commit_message_and_untracked_diff_include_files() {
     f.write("a", "updated\n");
     f.write("b", "new\n");
     f.sync();
-    filetrail::git::commit(&f.store, Some("custom message"), &["macos/config/a".into()]).unwrap();
+    filetrail::git::commit(&f.store, Some("custom message"), &[f.key("a")]).unwrap();
     let commit = repo.head().unwrap().peel_to_commit().unwrap();
     assert_eq!(commit.message().unwrap(), "custom message");
     assert!(
         commit
             .tree()
             .unwrap()
-            .get_path(Path::new("macos/config/b"))
+            .get_path(Path::new(&f.key("b")))
             .is_err()
     );
     fs::remove_file(f.source.join("a")).unwrap();
@@ -703,7 +729,7 @@ fn default_commit_message_and_untracked_diff_include_files() {
             .unwrap()
             .message()
             .unwrap()
-            .contains("delete \"macos/config/a\"")
+            .contains(&format!("delete {:?}", f.key("a")))
     );
 }
 
@@ -839,15 +865,27 @@ fn cli_init_subdir_and_list_import() {
     fs::write(temp.path().join("one"), "1").unwrap();
     fs::write(temp.path().join("two"), "2").unwrap();
     let list = temp.path().join("files.txt");
-    fs::write(&list, "# relative to this file\n\none first\ntwo second\n").unwrap();
+    fs::write(&list, "# relative to this file\n\none\ntwo\n").unwrap();
     let add = run(&["add", "--from", list.to_str().unwrap()]);
     assert!(
         add.status.success(),
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    assert_eq!(fs::read_to_string(repo.join("linux/first")).unwrap(), "1");
-    assert_eq!(fs::read_to_string(repo.join("linux/second")).unwrap(), "2");
+    let prefix = Path::new("linux/__ROOT__").join(
+        fs::canonicalize(temp.path())
+            .unwrap()
+            .strip_prefix("/")
+            .unwrap(),
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join(&prefix).join("one")).unwrap(),
+        "1"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join(&prefix).join("two")).unwrap(),
+        "2"
+    );
     let repository = Repository::open(&repo).unwrap();
     repository
         .config()
@@ -873,11 +911,17 @@ fn cli_init_subdir_and_list_import() {
         .message()
         .unwrap()
         .to_owned();
-    assert!(message.contains("add \"linux/first\""), "{message}");
-    assert!(message.contains("add \"linux/second\""), "{message}");
+    assert!(
+        message.contains(&format!("add {:?}", prefix.join("one"))),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("add {:?}", prefix.join("two"))),
+        "{message}"
+    );
     assert!(!run(&["init", repo.to_str().unwrap()]).status.success());
     assert!(run(&["remove", "1"]).status.success());
-    assert!(repo.join("linux/first").exists());
+    assert!(repo.join(&prefix).join("one").exists());
 }
 
 #[test]
@@ -890,7 +934,7 @@ fn list_import_supports_spaces_quoted_paths_and_literal_variables() {
     f.write("scripts two/build.sh", "build\n");
     f.write("$literal", "literal\n");
     let list = f._temp.path().join("files.txt");
-    fs::write(&list, "# quoted sources and targets\n\"source/notes one\" \"notes copy\"\n'source/scripts two' 'scripts copy' # directory\n'source/$literal' 'literal/$name'\n").unwrap();
+    fs::write(&list, "# quoted sources\n\"source/notes one\"\n'source/scripts two' # directory\n'source/$literal'\n").unwrap();
     let output = f.cli(&["add", "--from", list.to_str().unwrap()]);
     assert!(
         output.status.success(),
@@ -898,14 +942,11 @@ fn list_import_supports_spaces_quoted_paths_and_literal_variables() {
         String::from_utf8_lossy(&output.stderr)
     );
     for (path, expected) in [
-        ("notes copy", "notes\n"),
-        ("scripts copy/build.sh", "build\n"),
-        ("literal/$name", "literal\n"),
+        ("notes one", "notes\n"),
+        ("scripts two/build.sh", "build\n"),
+        ("$literal", "literal\n"),
     ] {
-        assert_eq!(
-            fs::read_to_string(f.repository.join("macos").join(path)).unwrap(),
-            expected
-        );
+        assert_eq!(fs::read_to_string(f.target(path)).unwrap(), expected);
     }
 }
 
@@ -918,14 +959,14 @@ fn malformed_list_reports_line_number_without_partial_import() {
     f.write("a", "first entry");
     let before = fs::read(f.store.root.join("config.toml")).unwrap();
     let list = f._temp.path().join("files.txt");
-    for invalid in ["unquoted path target", "\"unclosed"] {
-        fs::write(&list, format!("source/a first\n{invalid}\n")).unwrap();
+    for invalid in ["source/a target", "unquoted path target", "\"unclosed"] {
+        fs::write(&list, format!("source/a\n{invalid}\n")).unwrap();
         let output = f.cli(&["add", "--from", list.to_str().unwrap()]);
         assert!(!output.status.success());
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("files.txt:2"), "{error}");
         assert_eq!(fs::read(f.store.root.join("config.toml")).unwrap(), before);
-        assert!(!f.repository.join("first").exists());
+        assert!(!f.target("a").exists());
         assert!(!f.store.root.join("state.db").exists());
     }
 }
@@ -942,7 +983,7 @@ fn dry_run_preserves_existing_sqlite_state() {
         report
             .actions
             .iter()
-            .any(|action| action == "update config/a")
+            .any(|action| action == &format!("update {}", f.key("a")))
     );
     assert_eq!(fs::read(f.store.root.join("state.db")).unwrap(), before);
     assert_eq!(fs::read_to_string(f.target("a")).unwrap(), "before");
@@ -955,10 +996,16 @@ fn single_file_ownership_modification_and_deletion() {
     let mut config = f.store.config().unwrap();
     config.entries[0].source.push("shellrc");
     config.entries[0].directory = false;
-    config.entries[0].target = ".zshrc".into();
+    config.entries[0].target.push("shellrc");
     f.store.save_config(&config).unwrap();
     f.sync();
-    assert!(f.store.state().unwrap().owned.contains_key("macos/.zshrc"));
+    assert!(
+        f.store
+            .state()
+            .unwrap()
+            .owned
+            .contains_key(&f.key("shellrc"))
+    );
     filetrail::git::commit(&f.store, None, &[]).unwrap();
     f.write("shellrc", "changed\n");
     f.sync();
@@ -969,9 +1016,96 @@ fn single_file_ownership_modification_and_deletion() {
     );
     fs::remove_file(f.source.join("shellrc")).unwrap();
     f.sync();
-    assert!(!f.repository.join("macos/.zshrc").exists());
+    assert!(!f.target("shellrc").exists());
     let message = filetrail::git::commit(&f.store, None, &[]).unwrap();
-    assert!(message.contains("delete \"macos/.zshrc\""), "{message}");
+    assert!(
+        message.contains(&format!("delete {:?}", f.key("shellrc"))),
+        "{message}"
+    );
+}
+
+#[test]
+fn cli_layout_distinguishes_home_and_root_for_sources_and_lists() {
+    for subdir in [".", "macos"] {
+        for list_import in [false, true] {
+            let f = CompletionFixture::new();
+            let repository = f.temp.path().join("repo");
+            let data = f.temp.path().join("data");
+            let external = f.temp.path().join("external scripts");
+            fs::create_dir(&external).unwrap();
+            fs::write(external.join("build.sh"), "build\n").unwrap();
+            fs::write(f.home.join(".zshrc"), "shell\n").unwrap();
+            let run = |args: &[&str]| {
+                output_text(
+                    f.command(&f.binary)
+                        .arg("--data-dir")
+                        .arg(&data)
+                        .args(args)
+                        .output()
+                        .unwrap(),
+                )
+            };
+            run(&["init", repository.to_str().unwrap(), "--subdir", subdir]);
+            if list_import {
+                let list = f.home.join("files.txt");
+                fs::write(&list, "~/.zshrc\n'../external scripts'\n").unwrap();
+                run(&["add", "--from", list.to_str().unwrap()]);
+            } else {
+                run(&["add", ".zshrc"]);
+                run(&["add", external.to_str().unwrap()]);
+            }
+            let base = repository.join(subdir);
+            assert_eq!(
+                fs::read_to_string(base.join("__HOME__/.zshrc")).unwrap(),
+                "shell\n"
+            );
+            let external_relative = fs::canonicalize(&external)
+                .unwrap()
+                .strip_prefix("/")
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                fs::read_to_string(
+                    base.join("__ROOT__")
+                        .join(&external_relative)
+                        .join("build.sh")
+                )
+                .unwrap(),
+                "build\n"
+            );
+            assert!(!base.join(".zshrc").exists());
+            assert!(!base.join(&external_relative).exists());
+            run(&["sync"]);
+            assert!(run(&["list"]).contains("__HOME__/.zshrc"));
+            for reserved in ["__HOME__", "macos/__root__"] {
+                let rejected = f
+                    .command(&f.binary)
+                    .arg("--data-dir")
+                    .arg(f.temp.path().join("reserved-data"))
+                    .args([
+                        "init",
+                        f.temp.path().join("reserved-repo").to_str().unwrap(),
+                        "--subdir",
+                        reserved,
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(!rejected.status.success());
+            }
+        }
+    }
+}
+
+#[test]
+fn custom_and_legacy_targets_are_rejected_without_rewriting_configuration() {
+    let f = Fixture::new("", false);
+    let before = fs::read(f.store.root.join("config.toml")).unwrap();
+    for target in ["config", "__HOME__/renamed", "__ROOT__/renamed"] {
+        let mut config = f.store.config().unwrap();
+        config.entries[0].target = target.into();
+        assert!(f.store.save_config(&config).is_err());
+        assert_eq!(fs::read(f.store.root.join("config.toml")).unwrap(), before);
+    }
 }
 
 #[test]
@@ -1007,6 +1141,7 @@ fn external_sources_default_to_absolute_hierarchy_for_cli_and_lists() {
             let target = f
                 .repository
                 .join(subdir)
+                .join("__ROOT__")
                 .join(source.strip_prefix("/").unwrap());
             assert_eq!(
                 fs::read_to_string(target.join("one")).unwrap(),
@@ -1019,7 +1154,10 @@ fn external_sources_default_to_absolute_hierarchy_for_cli_and_lists() {
             let config = f.store.config().unwrap();
             assert_eq!(config.entries.len(), 2);
             for entry in &config.entries {
-                assert_eq!(entry.target, entry.source.strip_prefix("/").unwrap());
+                assert_eq!(
+                    entry.target,
+                    Path::new("__ROOT__").join(entry.source.strip_prefix("/").unwrap())
+                );
             }
             let commit = filetrail::git::commit(&f.store, None, &[]).unwrap();
             assert!(commit.contains("sync 2 files"), "{commit}");
@@ -1053,8 +1191,8 @@ fn target_deletion_and_conflicted_deletion_are_protected() {
     );
     assert!(!f.target("a").exists());
     assert_eq!(fs::read_to_string(f.target("b")).unwrap(), "external edit");
-    filetrail::sync::run(&f.store, false, Some(Path::new("config/a"))).unwrap();
-    assert!(f.store.state().unwrap().conflicts.contains_key("config/b"));
+    filetrail::sync::run(&f.store, false, Some(Path::new(&f.key("a")))).unwrap();
+    assert!(f.store.state().unwrap().conflicts.contains_key(&f.key("b")));
     assert_eq!(fs::read_to_string(f.target("b")).unwrap(), "external edit");
 }
 
@@ -1065,25 +1203,29 @@ fn source_exclusions_do_not_turn_a_single_file_into_a_deletion() {
     let mut config = f.store.config().unwrap();
     config.entries[0].source.push("a.tmp");
     config.entries[0].directory = false;
-    config.entries[0].target = "renamed".into();
+    config.entries[0].target.push("a.tmp");
     f.store.save_config(&config).unwrap();
     f.sync();
     config.entries[0].exclude = vec!["*.tmp".into()];
     f.store.save_config(&config).unwrap();
     f.sync();
-    assert!(f.repository.join("renamed").exists());
+    assert!(f.target("a.tmp").exists());
 }
 
 #[test]
 fn target_gitignore_does_not_force_add_ignored_files() {
     let f = Fixture::new("", false);
-    fs::write(f.repository.join(".gitignore"), "config/ignored\n").unwrap();
+    fs::write(
+        f.repository.join(".gitignore"),
+        format!("/{}\n", f.key("ignored")),
+    )
+    .unwrap();
     f.write("ignored", "value");
     f.sync();
     assert!(
         filetrail::git::status(&f.store)
             .unwrap()
-            .contains("[ignored] config/ignored")
+            .contains(&format!("[ignored] {}", f.key("ignored")))
     );
     assert!(filetrail::git::commit(&f.store, None, &[]).is_err());
 }
@@ -1094,8 +1236,8 @@ fn case_insensitive_target_collisions_are_rejected() {
     let mut config = f.store.config().unwrap();
     let mut other = config.entries[0].clone();
     other.id = 2;
-    other.source = f.source.with_extension("other");
-    other.target = "CONFIG/child".into();
+    other.source = config.entries[0].source.with_file_name("SOURCE");
+    other.target = Path::new("__ROOT__").join(other.source.strip_prefix("/").unwrap());
     config.entries.push(other);
     assert!(f.store.save_config(&config).is_err());
 }
@@ -1144,4 +1286,323 @@ fn background_start_polling_and_singleton() {
     });
     assert!(f.cli(&["daemon", "stop"]).status.success());
     assert!(!f.cli(&["daemon", "status"]).status.success());
+}
+
+#[test]
+fn retarget_preserves_options_and_old_history_and_resets_ownership() {
+    let f = Fixture::new("macos", true);
+    f.write("a", "original");
+    f.write("deleted", "keep in old repository");
+    f.sync();
+    output_text(f.cli(&["commit", "-m", "original"]));
+    let old_head = Repository::open(&f.repository)
+        .unwrap()
+        .head()
+        .unwrap()
+        .target();
+    let mut config = f.store.config().unwrap();
+    config.exclude = vec!["*.tmp".into()];
+    config.entries[0].exclude = vec!["*.bak".into()];
+    f.store.save_config(&config).unwrap();
+    fs::remove_file(f.source.join("deleted")).unwrap();
+    f.write("a", "new");
+    f.write("skip.tmp", "excluded");
+    f.write("skip.bak", "excluded");
+    let new_repo = f._temp.path().join("new/nested-repo");
+    output_text(f.cli(&["retarget", new_repo.to_str().unwrap()]));
+    let new_config = f.store.config().unwrap();
+    assert_eq!(new_config.repository, fs::canonicalize(&new_repo).unwrap());
+    config.repository = new_config.repository.clone();
+    assert_eq!(
+        toml::to_string(&config).unwrap(),
+        toml::to_string(&new_config).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(new_repo.join(f.key("a"))).unwrap(),
+        "new"
+    );
+    assert!(!new_repo.join(f.key("skip.tmp")).exists());
+    assert!(!new_repo.join(f.key("skip.bak")).exists());
+    assert_eq!(fs::read_to_string(f.target("a")).unwrap(), "original");
+    assert!(f.target("deleted").exists());
+    assert!(
+        !f.store
+            .state()
+            .unwrap()
+            .owned
+            .contains_key(&f.key("deleted"))
+    );
+    assert_eq!(
+        Repository::open(&f.repository)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target(),
+        old_head
+    );
+    assert!(Repository::open(&new_repo).unwrap().head().is_err());
+}
+
+#[test]
+fn retarget_conflicts_preserve_existing_content_and_staging() {
+    let f = Fixture::new("macos", false);
+    f.write("a", "old baseline");
+    f.sync();
+    f.write("a", "changed source");
+    let new_repo = f._temp.path().join("new-repo");
+    let repo = Repository::init(&new_repo).unwrap();
+    let target = new_repo.join(f.key("a"));
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    // Matching the old baseline must still conflict in a different repository.
+    fs::write(&target, "old baseline").unwrap();
+    fs::write(new_repo.join("unrelated"), "staged").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("unrelated")).unwrap();
+    index.write().unwrap();
+    let index_before = fs::read(repo.path().join("index")).unwrap();
+    let output = f.cli(&["retarget", new_repo.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert_eq!(
+        f.store.config().unwrap().repository,
+        fs::canonicalize(new_repo).unwrap()
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "old baseline");
+    assert!(f.store.state().unwrap().conflicts.contains_key(&f.key("a")));
+    assert_eq!(fs::read(repo.path().join("index")).unwrap(), index_before);
+    output_text(f.cli(&["resolve", &f.key("a"), "--use-source"]));
+    assert_eq!(fs::read_to_string(target).unwrap(), "changed source");
+}
+
+#[test]
+fn retarget_subdir_and_unchanged_target_keep_expected_baselines() {
+    let f = Fixture::new("macos", false);
+    f.write("a", "first");
+    f.sync();
+    let old_target = f.target("a");
+    f.write("a", "second");
+    // Resetting baselines here would incorrectly report a first-sync conflict.
+    output_text(f.cli(&["retarget", f.repository.to_str().unwrap()]));
+    assert_eq!(fs::read_to_string(&old_target).unwrap(), "second");
+    output_text(f.cli(&["retarget", f.repository.to_str().unwrap(), "--subdir", "."]));
+    assert_eq!(fs::read_to_string(f.target("a")).unwrap(), "second");
+    assert!(f.key("a").starts_with("__ROOT__/"));
+    f.write("a", "third");
+    f.sync();
+    assert_eq!(fs::read_to_string(old_target).unwrap(), "second");
+    assert_eq!(fs::read_to_string(f.target("a")).unwrap(), "third");
+}
+
+#[test]
+fn invalid_retarget_leaves_configuration_and_state_untouched() {
+    let f = Fixture::new("macos", false);
+    f.write("a", "content");
+    f.sync();
+    let before_config = fs::read(f.store.root.join("config.toml")).unwrap();
+    let before_state = f.store.state().unwrap();
+    for target in [
+        f.source.join("nested"),
+        f.store.root.join("nested"),
+        f.repository.join("nested"),
+        f._temp.path().to_path_buf(),
+    ] {
+        assert!(
+            !f.cli(&["retarget", target.to_str().unwrap()])
+                .status
+                .success()
+        );
+    }
+    assert!(
+        !f.cli(&[
+            "retarget",
+            f.repository.to_str().unwrap(),
+            "--subdir",
+            "__ROOT__"
+        ])
+        .status
+        .success()
+    );
+    let new_repo = f._temp.path().join("new-repo");
+    fs::create_dir(&new_repo).unwrap();
+    symlink(&f.source, new_repo.join("macos")).unwrap();
+    assert!(
+        !f.cli(&["retarget", new_repo.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read(f.store.root.join("config.toml")).unwrap(),
+        before_config
+    );
+    assert_eq!(f.store.state().unwrap(), before_state);
+    assert!(!f.source.join("nested").exists());
+}
+
+#[test]
+fn interrupted_retarget_recovers_before_using_old_baselines() {
+    // Simulate interruption after each durable step of the cross-file update.
+    for phase in 0..3 {
+        let f = Fixture::new("macos", false);
+        f.write("a", "old baseline");
+        f.sync();
+        f.write("a", "source changed");
+        let new_repo = f._temp.path().join("new-repo");
+        Repository::init(&new_repo).unwrap();
+        let target = new_repo.join(f.key("a"));
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "old baseline").unwrap();
+        let mut config = f.store.config().unwrap();
+        config.repository = fs::canonicalize(new_repo).unwrap();
+        fs::write(
+            f.store.root.join("pending-retarget.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        if phase >= 1 {
+            f.store.save_state(&Default::default()).unwrap();
+        }
+        if phase >= 2 {
+            f.store.save_config(&config).unwrap();
+        }
+        let report = filetrail::sync::run(&f.store, false, None).unwrap();
+        assert!(!report.errors.is_empty());
+        assert_eq!(fs::read_to_string(target).unwrap(), "old baseline");
+        assert_eq!(f.store.config().unwrap().repository, config.repository);
+        assert!(!f.store.root.join("pending-retarget.toml").exists());
+        assert!(f.store.state().unwrap().conflicts.contains_key(&f.key("a")));
+    }
+}
+
+#[test]
+fn deinit_is_repeatable_preserves_files_and_allows_fresh_init() {
+    let f = Fixture::new("macos", true);
+    f.write("a", "content");
+    f.sync();
+    output_text(f.cli(&["commit", "-m", "saved"]));
+    let target = f.target("a");
+    let head = Repository::open(&f.repository)
+        .unwrap()
+        .head()
+        .unwrap()
+        .target();
+    fs::write(f.store.root.join("daemon.log"), "keep log").unwrap();
+    fs::write(f.store.root.join("custom.txt"), "keep custom file").unwrap();
+    // deinit must work even with invalid configuration/state or recovery data.
+    for name in ["config.toml", "state.db", "pending-retarget.toml"] {
+        fs::write(f.store.root.join(name), "invalid").unwrap();
+    }
+    for _ in 0..2 {
+        output_text(f.cli(&["deinit"]));
+        assert!(!f.store.root.join("config.toml").exists());
+        assert!(!f.store.root.join("state.db").exists());
+        assert!(!f.store.root.join("pending-retarget.toml").exists());
+    }
+    assert_eq!(fs::read_to_string(target).unwrap(), "content");
+    assert_eq!(fs::read_to_string(f.source.join("a")).unwrap(), "content");
+    assert_eq!(
+        fs::read_to_string(f.store.root.join("daemon.log")).unwrap(),
+        "keep log"
+    );
+    assert!(f.store.root.join("custom.txt").exists());
+    assert_eq!(
+        Repository::open(&f.repository)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target(),
+        head
+    );
+    let new_repo = f._temp.path().join("new-repo");
+    output_text(f.cli(&["init", new_repo.to_str().unwrap()]));
+    assert!(f.store.config().unwrap().entries.is_empty());
+    assert_eq!(f.store.state().unwrap(), Default::default());
+}
+
+#[test]
+fn retarget_keeps_daemon_paused_then_deinit_stops_it() {
+    let f = Fixture::new("macos", false);
+    f.write("a", "initial");
+    let child = Command::new(env!("CARGO_BIN_EXE_filetrail"))
+        .arg("--data-dir")
+        .arg(&f.store.root)
+        .args(["daemon", "run", "--poll"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut child = ChildGuard(child);
+    wait_until(|| f.target("a").exists());
+    let old_target = f.target("a");
+    output_text(f.cli(&["pause"]));
+    f.write("a", "retargeted");
+    let new_repo = f._temp.path().join("new-repo");
+    output_text(f.cli(&["retarget", new_repo.to_str().unwrap(), "--subdir", "linux"]));
+    assert!(output_text(f.cli(&["daemon", "status"])).contains("paused=true"));
+    let target = new_repo.join(f.key("a"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "retargeted");
+    f.write("a", "paused change");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "retargeted");
+    output_text(f.cli(&["resume"]));
+    wait_until(|| fs::read_to_string(&target).is_ok_and(|value| value == "paused change"));
+    assert_eq!(fs::read_to_string(old_target).unwrap(), "initial");
+    output_text(f.cli(&["deinit"]));
+    assert!(child.0.wait().unwrap().success());
+    assert!(!f.store.root.join("daemon.sock").exists());
+    assert!(!f.store.root.join("state.db").exists());
+    assert_eq!(fs::read_to_string(target).unwrap(), "paused change");
+}
+
+#[test]
+fn init_refuses_leftover_state_until_explicit_deinit() {
+    for name in [
+        "state.db",
+        "state.db-journal",
+        "state.db-wal",
+        "state.db-shm",
+    ] {
+        let f = Fixture::new("macos", false);
+        fs::remove_file(f.store.root.join("config.toml")).unwrap();
+        fs::write(f.store.root.join(name), "leftover").unwrap();
+        assert!(
+            !f.cli(&["init", f.repository.to_str().unwrap()])
+                .status
+                .success()
+        );
+        assert_eq!(
+            fs::read_to_string(f.store.root.join(name)).unwrap(),
+            "leftover"
+        );
+        output_text(f.cli(&["deinit"]));
+        output_text(f.cli(&["init", f.repository.to_str().unwrap()]));
+        assert_eq!(f.store.state().unwrap(), Default::default());
+    }
+}
+
+#[test]
+fn retarget_refuses_corrupt_state_and_preserves_disabled_entries() {
+    let f = Fixture::new("macos", true);
+    f.write("a", "content");
+    let new_repo = f._temp.path().join("new-repo");
+    fs::write(f.store.root.join("state.db"), "corrupt").unwrap();
+    assert!(
+        !f.cli(&["retarget", new_repo.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!new_repo.exists());
+    assert_eq!(
+        fs::read_to_string(f.store.root.join("state.db")).unwrap(),
+        "corrupt"
+    );
+    fs::remove_file(f.store.root.join("state.db")).unwrap();
+    output_text(f.cli(&["disable", "1"]));
+    output_text(f.cli(&["retarget", new_repo.to_str().unwrap()]));
+    assert!(!f.store.config().unwrap().entries[0].enabled);
+    assert!(!new_repo.join(f.key("a")).exists());
+    output_text(f.cli(&["enable", "1"]));
+    f.sync();
+    assert_eq!(
+        fs::read_to_string(new_repo.join(f.key("a"))).unwrap(),
+        "content"
+    );
 }
