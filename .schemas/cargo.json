@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Taplo 0.10.0 does not load external references hidden inside anyOf. Validate Cargo lints explicitly so its schema is loaded before validating the complete manifest. Both validations use the official SchemaStore schemas.",
+  "allOf": [
+    {
+      "properties": {
+        "lints": {
+          "properties": {
+            "cargo": {
+              "$ref": "https://www.schemastore.org/cargo-lints-cargo.json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "$ref": "https://www.schemastore.org/cargo.json"
+    }
+  ]
+}

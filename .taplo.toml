@@ -5,3 +5,9 @@ include = ["**/*.toml"]
 column_width = 100
 reorder_inline_tables = true
 reorder_keys = true
+
+[[rule]]
+include = ["Cargo.toml"]
+
+[rule.schema]
+path = ".schemas/cargo.json"
