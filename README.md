@@ -81,20 +81,26 @@ immediately copies its existing files; the daemon keeps subsequent changes in sy
 
 ## Choose where files go
 
-Sources inside HOME keep their Home-relative paths. Sources outside HOME keep their
-absolute hierarchy without the leading `/`. Use `--to` to choose a different target,
-relative to the subdirectory selected during `init`.
+Sources inside Home are stored under `__HOME__`, preserving their Home-relative
+paths. All other sources are stored under `__ROOT__`, preserving their absolute
+hierarchy without the leading `/`. These directories sit inside the subdirectory
+selected during `init`, or directly at the repository root when it is omitted.
 
-| Source | Subdirectory | Target | File in the repository |
-| --- | --- | --- | --- |
-| `~/.zshrc` | `macos` | Default | `macos/.zshrc` |
-| `~/.config/nvim` | `linux` | Default | `linux/.config/nvim/init.lua` |
-| `/opt/scripts/build.sh` | `macos` | Default | `macos/opt/scripts/build.sh` |
-| `/opt/scripts` | `macos` | `scripts` | `macos/scripts/build.sh` |
+| Source | Subdirectory | File in the repository |
+| --- | --- | --- |
+| `~/.zshrc` | `macos` | `macos/__HOME__/.zshrc` |
+| `~/.config/nvim` | `linux` | `linux/__HOME__/.config/nvim/init.lua` |
+| `/opt/scripts/build.sh` | `macos` | `macos/__ROOT__/opt/scripts/build.sh` |
+| `/opt/scripts` | Omitted | `__ROOT__/opt/scripts/build.sh` |
+
+For restoration, `__HOME__` refers to the current user's Home and `__ROOT__` to `/`.
+Custom target paths are not supported: preserving source paths makes the original
+location unambiguous. `__HOME__` and `__ROOT__` are reserved and cannot be used as
+components of `--subdir`.
 
 ```sh
-filetrail add /opt/scripts --to scripts
-filetrail add ~/notes --to notes --exclude '**/*.tmp'
+filetrail add /opt/scripts
+filetrail add ~/notes --exclude '**/*.tmp'
 ```
 
 Directories are watched recursively. Exclusions are relative to the source root.
@@ -102,23 +108,55 @@ Relative source paths are resolved from your current directory; parent-directory
 symlinks are resolved to their actual locations. Sources, destinations, and the
 application data directory must not overlap.
 
+## Change the target or start over
+
+To switch repositories while keeping your sources, exclusions, and deletion settings:
+
+```sh
+filetrail retarget ~/new-dotfiles
+filetrail retarget ~/new-dotfiles --subdir linux
+filetrail retarget ~/new-dotfiles --subdir . # Save at the repository root
+```
+
+Omitting `--subdir` keeps the current subdirectory. You can also change just the
+subdirectory by specifying the current repository. FileTrail creates the repository
+if needed and immediately syncs enabled sources to the new location. The daemon
+continues using the new target and retains its paused/running status.
+
+The old files and Git history remain where they are; they are not moved or deleted.
+Different content already present at the new destination is reported as a conflict
+and kept for you to resolve. The target has changed even if this initial sync reports
+conflicts; use `conflicts` and `resolve` against the new repository.
+
+To stop using a profile or initialize it again from scratch:
+
+```sh
+filetrail deinit
+filetrail init ~/another-repository --subdir macos
+```
+
+`deinit` stops the daemon, uninstalls its registered startup service, and clears
+this profile's configuration and synchronization records. It preserves source files,
+repositories, Git history, logs, and shell completion. You can run it again safely.
+After reinitializing, add your sources and start the daemon or install the service again.
+Use the same `--data-dir` if you selected a custom profile.
+
 ## Add sources from a list
 
 ```sh
 filetrail add --from ./files.txt
 ```
 
-Write one entry per line as `source` or `source target`, separated by spaces.
-Use single or double quotes around paths containing spaces. Targets are optional;
-omitting one uses the defaults above.
+Write one source per line. Use single or double quotes around paths containing
+spaces. A second column for a custom target is not supported.
 
 ```text
-# source [target]
+# source
 ~/.zshrc
 ~/.config/nvim
-/opt/scripts scripts
-"~/My Notes" "notes backup"
-'./local scripts' 'scripts backup'
+/opt/scripts
+"~/My Notes"
+'./local scripts'
 ```
 
 Relative source paths are resolved from the list's directory. Blank lines and
@@ -144,7 +182,7 @@ Source deletions are retained at the destination by default. Enable deletion
 propagation when adding a source:
 
 ```sh
-filetrail add ~/scripts --to scripts --delete
+filetrail add ~/scripts --delete
 ```
 
 Only previously synchronized files can be deleted. If an entire source directory
@@ -157,10 +195,10 @@ and destination Git ignore rules apply when committing.
 ```sh
 filetrail status
 filetrail diff
-filetrail diff -- macos/.config/nvim
+filetrail diff -- macos/__HOME__/.config/nvim
 filetrail commit
 filetrail commit -m 'Update shell configuration'
-filetrail commit -- macos/.zshrc
+filetrail commit -- macos/__HOME__/.zshrc
 ```
 
 The daemon never commits or pushes automatically. `diff` includes new file contents.
@@ -172,9 +210,9 @@ Without `-m`, FileTrail generates a message listing the selected changes:
 ```text
 FileTrail: sync 3 files (+1 ~1 -1)
 
-add "macos/.config/nvim/init.lua"
-delete "macos/.oldrc"
-modify "macos/.zshrc"
+add "macos/__HOME__/.config/nvim/init.lua"
+delete "macos/__HOME__/.oldrc"
+modify "macos/__HOME__/.zshrc"
 ```
 
 To keep the destination stable while reviewing:
@@ -198,7 +236,7 @@ the source version:
 
 ```sh
 filetrail conflicts
-filetrail resolve macos/.zshrc --use-source
+filetrail resolve macos/__HOME__/.zshrc --use-source
 ```
 
 You can also make both copies identical yourself and run `filetrail sync` again.

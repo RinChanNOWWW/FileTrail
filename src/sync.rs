@@ -50,6 +50,11 @@ pub fn exclusions(patterns: &[String]) -> Result<GlobSet> {
 
 pub fn run(store: &Store, dry_run: bool, overwrite: Option<&Path>) -> Result<Report> {
     let _lock = store.lock()?;
+    run_locked(store, dry_run, overwrite)
+}
+
+// The caller must hold operation.lock across configuration/state changes and sync.
+pub(crate) fn run_locked(store: &Store, dry_run: bool, overwrite: Option<&Path>) -> Result<Report> {
     let config = store.config()?;
     let repo = crate::git::open(&config)?;
     crate::git::ensure_idle(&repo)?;

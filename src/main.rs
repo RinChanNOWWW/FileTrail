@@ -39,14 +39,21 @@ enum Commands {
         #[arg(long, default_value = ".")]
         subdir: PathBuf,
     },
+    /// Change the target while keeping sources and synchronization options.
+    Retarget {
+        #[arg(value_hint = clap::ValueHint::DirPath)]
+        repository: PathBuf,
+        /// New repository-relative destination root; omitted keeps the current value.
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
+        subdir: Option<PathBuf>,
+    },
+    /// Stop the daemon, uninstall its service, and forget this profile. Keeps files and repositories.
+    Deinit,
     /// Add a source and immediately synchronize existing files.
     Add {
         #[arg(required_unless_present = "from", conflicts_with = "from")]
         source: Option<PathBuf>,
-        /// Override the default Home-relative or root-relative destination.
-        #[arg(long, conflicts_with = "from")]
-        to: Option<PathBuf>,
-        /// Import source [target] lines separated by spaces; quote paths containing spaces.
+        /// Import one source per line; quote paths containing spaces.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         from: Option<PathBuf>,
         /// Propagate source deletions for files previously synchronized.
@@ -173,11 +180,57 @@ fn execute(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let store = Store::new(data_root(cli.data_dir)?)?;
+    // Lifecycle commands share a separate lock: never wait for a daemon while
+    // holding operation.lock, since the daemon may itself be waiting to sync.
+    let _lifecycle = if matches!(
+        &cli.command,
+        Commands::Init { .. }
+            | Commands::Retarget { .. }
+            | Commands::Deinit
+            | Commands::Daemon(
+                DaemonCommands::Start { .. }
+                    | DaemonCommands::Stop
+                    | DaemonCommands::Restart { .. }
+            )
+            | Commands::Service(ServiceCommands::Install | ServiceCommands::Uninstall)
+    ) {
+        let lock = store.lock_file("lifecycle.lock")?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        Some(lock)
+    } else {
+        None
+    };
     match cli.command {
+        Commands::Retarget { repository, subdir } => {
+            let report = filetrail::lifecycle::retarget(&store, &repository, subdir.as_deref())?;
+            println!("Target selected. The previous repository and files have been kept.");
+            print_report(report)?;
+        }
+        Commands::Deinit => {
+            filetrail::lifecycle::deinit(&store)?;
+            println!(
+                "Deinitialized. Source files, repositories, logs, and shell completion have been kept."
+            );
+        }
         Commands::Init { repository, subdir } => {
             let _lock = store.lock()?;
             if store.root.join("config.toml").exists() {
-                bail!("already initialized; edit config.toml or use a different --data-dir");
+                bail!(
+                    "already initialized; use filetrail retarget to change the target, or filetrail deinit to start over"
+                );
+            }
+            if [
+                "state.db",
+                "state.db-journal",
+                "state.db-wal",
+                "state.db-shm",
+            ]
+            .iter()
+            .any(|name| store.root.join(name).exists())
+            {
+                bail!(
+                    "leftover synchronization state; run filetrail deinit before initializing again"
+                );
             }
             let subdir = filetrail::config::relative(&subdir)?;
             let repository = if repository.starts_with("~") {
@@ -219,7 +272,6 @@ fn execute(cli: Cli) -> Result<()> {
         }
         Commands::Add {
             source,
-            to,
             from,
             delete,
             exclude,
@@ -242,28 +294,28 @@ fn execute(cli: Cli) -> Result<()> {
                     let list = filetrail::config::expand(&list, &cwd)?;
                     let base = list.parent().context("list has no parent")?;
                     for (line_number, line) in fs::read_to_string(&list)?.lines().enumerate() {
-                        let Some((source, target)) = filetrail::manifest::parse_line(line)
+                        let Some(source) = filetrail::manifest::parse_line(line)
                             .with_context(|| format!("{}:{}", list.display(), line_number + 1))?
                         else {
                             continue;
                         };
-                        sources.push((
+                        sources.push(
                             filetrail::config::expand(&source, base).with_context(|| {
                                 format!("{}:{}", list.display(), line_number + 1)
                             })?,
-                            target,
-                        ));
+                        );
                     }
                 } else {
-                    sources.push((
-                        filetrail::config::expand(&source.context("missing source")?, &cwd)?,
-                        to,
-                    ));
+                    sources.push(filetrail::config::expand(
+                        &source.context("missing source")?,
+                        &cwd,
+                    )?);
                 }
                 if sources.is_empty() {
                     bail!("source list contains no entries");
                 }
-                for (source, target) in sources {
+                let home = filetrail::config::home_dir()?;
+                for source in sources {
                     if source.starts_with(&store.root) || store.root.starts_with(&source) {
                         bail!("source and data directory must not overlap");
                     }
@@ -275,15 +327,7 @@ fn execute(cli: Cli) -> Result<()> {
                     {
                         bail!("source must be a regular file, directory, or symlink");
                     }
-                    let target = match target {
-                        Some(target) => filetrail::config::relative(&target)?,
-                        None => {
-                            let home = fs::canonicalize(
-                                dirs::home_dir().context("cannot determine home directory")?,
-                            )?;
-                            filetrail::config::default_target(&source, &home)?
-                        }
-                    };
+                    let target = filetrail::config::default_target(&source, &home)?;
                     config.entries.push(Entry {
                         id: next,
                         source,
@@ -477,6 +521,13 @@ mod tests {
 
     use super::Cli;
     use super::data_root;
+
+    #[test]
+    fn add_rejects_custom_targets() {
+        assert!(
+            Cli::try_parse_from(["filetrail", "add", "/tmp/source", "--to", "renamed"]).is_err()
+        );
+    }
 
     #[test]
     fn data_directory_defaults_to_dotfile_in_home() {
