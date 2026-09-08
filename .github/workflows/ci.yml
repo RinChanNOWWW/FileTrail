@@ -16,6 +16,34 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  version:
+    name: Check version is not already tagged
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reject an existing version tag
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          tag = f"v{version}"
+          tags = subprocess.check_output(["git", "tag", "--list"], text=True).splitlines()
+          if tag in tags:
+              print(
+                  f"::error file=Cargo.toml::Tag {tag} already exists on GitHub. "
+                  "Bump package.version in Cargo.toml to a new version and update Cargo.lock."
+              )
+              raise SystemExit(1)
+          print(f"Version {version} is available: tag {tag} does not exist.")
+          PY
+
   format:
     name: Rust and TOML formatting
     runs-on: ubuntu-latest

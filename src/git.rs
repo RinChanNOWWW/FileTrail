@@ -1,4 +1,7 @@
+use std::ffi::OsString;
 use std::path::Path;
+use std::process::Command;
+use std::process::ExitStatus;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -20,6 +23,19 @@ pub fn open(config: &Config) -> Result<Repository> {
         bail!("target must be the root of a non-bare Git repository");
     }
     Ok(repository)
+}
+
+/// Explicit passthrough only; built-in Git operations continue to use libgit2.
+pub fn run(store: &Store, args: &[OsString]) -> Result<ExitStatus> {
+    // Keep sync and retarget from changing the working tree while Git is running.
+    let _lock = store.lock()?;
+    let config = store.config()?;
+    open(&config)?;
+    Command::new("git")
+        .args(args)
+        .current_dir(&config.repository)
+        .status()
+        .context("cannot run system Git; install git and make sure it is on PATH")
 }
 
 pub fn ensure_idle(repository: &Repository) -> Result<()> {

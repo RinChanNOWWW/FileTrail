@@ -10,7 +10,8 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
   examples, and section coverage equivalent. Preserve their language-switch links.
 - Use the exact toolchain in rust-toolchain.toml. Keep Cargo.lock checked in.
 - Building requires a C compiler for vendored libgit2 and SQLite. The distributed executable
-  does not require a separate Rust or Git installation.
+  needs no separate Rust installation, and its built-in commands need no system Git.
+  Only the explicit `filetrail git` passthrough and its integration tests require Git on PATH.
 - Run `cargo fmt --all`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked --all-targets`, and `cargo test --locked --doc`.
 - Completion integration tests require Bash, Zsh, and Fish on PATH.
@@ -113,5 +114,11 @@ is needed, run `filetrail pause` first and `filetrail resume` afterward. Explici
 Only run `filetrail commit` when a commit is within the user's requested scope.
 Omit `-m` to use the generated message. Do not run `resolve --use-source`, enable
 deletion, or install a service merely to make a test or diagnostic pass.
+
+`filetrail cd` jumps to the repository root when the Bash, Zsh, or Fish integration
+is loaded; `command filetrail cd` prints its path. `filetrail git <args...>` runs
+system Git in that root under the operation lock. Put `--data-dir` before `git`.
+This explicit passthrough follows normal Git behavior, including unmanaged files;
+only run mutations such as commits or pushes when the user requests them.
 
 Report actual test outcomes and distinguish local checks from GitHub-hosted CI.

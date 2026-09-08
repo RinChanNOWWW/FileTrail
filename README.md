@@ -8,7 +8,8 @@ lets you review and commit them on your terms.
 
 Use it for dotfiles, scripts, notes, or other files spread across your machine.
 Keep separate macOS and Linux configurations in the same repository. Everything
-runs from a single executable, with no separate Git installation required.
+runs from a single executable. Built-in synchronization and version-control commands
+need no separate Git installation; the optional `filetrail git` passthrough uses system Git.
 
 ## Install
 
@@ -30,7 +31,7 @@ with `./install.sh zsh`. It installs with Cargo, then configures that shell's
 completion. Open a new shell afterward. The installation root defaults to
 `${CARGO_HOME:-$HOME/.cargo}`; set `CARGO_INSTALL_ROOT` to override it.
 
-## Tab completion
+## Tab completion and shell integration
 
 If you installed FileTrail with `cargo install`, enable completion with:
 
@@ -49,11 +50,12 @@ filetrail completions fish --install
 Run the command for the shell you use, then open a new shell. Tab completes
 subcommands (including `daemon` and `service` actions), options, and file paths.
 For example, try `filetrail da<Tab>`, `filetrail daemon st<Tab>`, or
-`filetrail add --f<Tab>`.
+`filetrail add --f<Tab>`. This also enables `filetrail cd` to change the current
+shell's directory to the target repository.
 
 Installation preserves existing shell configuration and is safe to repeat. It
 uses `.zshrc` (respecting `ZDOTDIR`), `.bashrc` and Bash's active login profile,
-or Fish's completion directory (respecting `XDG_CONFIG_HOME`). Home paths use
+or Fish's completion and function directories (respecting `XDG_CONFIG_HOME`). Home paths use
 `$HOME` in the installed hooks and command output, so your username is not embedded.
 Paths outside Home retain their absolute location. Completion stays
 in sync when you upgrade the executable at the same location. Run installation
@@ -227,6 +229,36 @@ filetrail resume
 `resume` catches up with changes made while paused. Explicit `sync` and `add`
 commands still copy files while automatic synchronization is paused. Paths passed
 to `diff`, `commit`, and `resolve` are relative to the repository root.
+
+## Jump to the repository and run Git
+
+With Bash, Zsh, or Fish integration installed, jump to the target repository:
+
+```sh
+filetrail completions --install # Also run once when upgrading to enable directory jumping
+# Open a new shell, then:
+filetrail cd
+```
+
+This changes the current shell's directory to the repository root, even when a
+`--subdir` is configured. Without shell integration, the executable prints the path;
+in Bash or Zsh you can use `cd "$(command filetrail cd)"`. Use `command filetrail cd`
+to print the path when integration is loaded, or add `--print0` for NUL-terminated output.
+
+Run any system Git command in the target repository without changing directories:
+
+```sh
+filetrail git status
+filetrail git log --oneline -10
+filetrail git push origin master
+filetrail --data-dir ~/filetrail-work git push origin master
+```
+
+This requires `git` on PATH and uses its normal configuration, credentials, and hooks.
+Put FileTrail's `--data-dir` before `git`; Git arguments, input/output, and exit codes
+are passed through. Synchronization waits while the Git command runs. No automatic
+sync, staging, or commit is added. `filetrail git commit` follows normal Git staging
+and can include any staged file; `filetrail commit` remains limited to managed changes.
 
 ## Resolve conflicts
 

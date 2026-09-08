@@ -123,6 +123,8 @@ fn completion_generation_includes_nested_commands_without_initialization() {
                 .unwrap(),
         );
         for expected in [
+            "cd",
+            "git",
             "daemon",
             "restart",
             "service",
@@ -147,6 +149,7 @@ fn completion_installation_is_idempotent_and_preserves_existing_profiles() {
         ".bash_login",
         ".zshrc",
         ".config/fish/completions/filetrail.fish",
+        ".config/fish/functions/filetrail.fish",
     ] {
         let path = f.home.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -155,7 +158,13 @@ fn completion_installation_is_idempotent_and_preserves_existing_profiles() {
     for (shell, names) in [
         ("bash", vec![".bashrc", ".bash_login"]),
         ("zsh", vec![".zshrc"]),
-        ("fish", vec![".config/fish/completions/filetrail.fish"]),
+        (
+            "fish",
+            vec![
+                ".config/fish/completions/filetrail.fish",
+                ".config/fish/functions/filetrail.fish",
+            ],
+        ),
     ] {
         let output = f.install(shell);
         assert!(output.contains("Open a new shell"));
@@ -223,6 +232,7 @@ fn completion_installation_respects_overrides_symlinks_and_permissions() {
             .unwrap(),
     );
     assert!(xdg.join("fish/completions/filetrail.fish").is_file());
+    assert!(xdg.join("fish/functions/filetrail.fish").is_file());
     assert!(!f.home.join(".zshrc").exists());
     assert!(!f.home.join(".config").exists());
 }
@@ -398,6 +408,51 @@ fn completion_hooks_follow_home_after_relocation() {
 }
 
 #[test]
+fn shell_integration_jumps_to_repository_and_preserves_other_commands() {
+    for shell in ["bash", "zsh", "fish"] {
+        let f = CompletionFixture::new();
+        let repository = f
+            .temp
+            .path()
+            .join("target 'quoted' $cash \"double\" `literal`\nend\n");
+        Repository::init(&repository).unwrap();
+        let repository = fs::canonicalize(repository).unwrap();
+        let store = Store::new(f.temp.path().join("state 'quoted'")).unwrap();
+        store
+            .save_config(&Config::new(repository.clone(), "macos".into()).unwrap())
+            .unwrap();
+        f.install(shell);
+        for script in [
+            "filetrail --data-dir \"$FILETRAIL_TEST_STATE\" cd || exit 1; test \"$PWD\" = \"$FILETRAIL_TEST_TARGET\"",
+            "filetrail cd --data-dir=\"$FILETRAIL_TEST_STATE\" || exit 1; test \"$PWD\" = \"$FILETRAIL_TEST_TARGET\"",
+            "filetrail cd --data-dir \"$FILETRAIL_TEST_STATE\" --help >/dev/null || exit 1; test \"$PWD\" = \"$FILETRAIL_TEST_START\"",
+            "filetrail --data-dir \"$FILETRAIL_TEST_STATE\" git --version || exit 1; test \"$PWD\" = \"$FILETRAIL_TEST_START\"",
+            "filetrail --data-dir \"$FILETRAIL_TEST_MISSING\" cd && exit 1; test \"$PWD\" = \"$FILETRAIL_TEST_START\"",
+            "filetrail --data-dir \"$FILETRAIL_TEST_STATE\" cd invalid && exit 1; test \"$PWD\" = \"$FILETRAIL_TEST_START\"",
+        ] {
+            let mut command = f.command(shell);
+            command
+                .env("FILETRAIL_TEST_STATE", &store.root)
+                .env("FILETRAIL_TEST_TARGET", &repository)
+                .env("FILETRAIL_TEST_START", fs::canonicalize(&f.home).unwrap())
+                .env("FILETRAIL_TEST_MISSING", f.temp.path().join("missing"));
+            match shell {
+                "bash" => {
+                    command.args(["--noprofile", "-ic", script]);
+                }
+                "zsh" => {
+                    command.args(["-d", "-ic", script]);
+                }
+                _ => {
+                    command.args(["-c", script]);
+                }
+            }
+            output_text(command.output().unwrap());
+        }
+    }
+}
+
+#[test]
 fn install_wrapper_uses_cargo_then_installs_completion_only_on_success() {
     let f = CompletionFixture::new();
     let fake_bin = f.temp.path().join("fake-bin");
@@ -515,12 +570,173 @@ impl Fixture {
 
     fn cli(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_filetrail"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .arg("--data-dir")
             .arg(&self.store.root)
             .args(args)
             .output()
             .unwrap()
     }
+}
+
+#[test]
+fn cd_prints_repository_root_and_follows_retarget() {
+    let f = Fixture::new("macos", false);
+    let repository = fs::canonicalize(&f.repository).unwrap();
+    assert_eq!(
+        output_text(f.cli(&["cd"])),
+        format!("{}\n", repository.display())
+    );
+    assert_eq!(
+        f.cli(&["cd", "--print0"]).stdout,
+        format!("{}\0", repository.display()).as_bytes()
+    );
+    let next = f._temp.path().join("another repository");
+    output_text(f.cli(&["retarget", next.to_str().unwrap()]));
+    assert_eq!(
+        output_text(f.cli(&["cd"])),
+        format!("{}\n", fs::canonicalize(&next).unwrap().display())
+    );
+    fs::rename(&next, f._temp.path().join("moved repository")).unwrap();
+    let result = f.cli(&["cd"]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+}
+
+#[test]
+fn git_runs_in_target_root_and_pushes_to_a_local_remote() {
+    let f = Fixture::new("macos", false);
+    let repository = fs::canonicalize(&f.repository).unwrap();
+    assert_eq!(
+        output_text(f.cli(&["git", "rev-parse", "--show-toplevel"])),
+        format!("{}\n", repository.display())
+    );
+    let repo = Repository::open(&f.repository).unwrap();
+    let mut index = repo.index().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let identity = repo.signature().unwrap();
+    let commit = repo
+        .commit(
+            Some("refs/heads/master"),
+            &identity,
+            &identity,
+            "Test commit",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    let remote_path = f._temp.path().join("remote.git");
+    let remote = Repository::init_bare(&remote_path).unwrap();
+    repo.remote("origin", remote_path.to_str().unwrap())
+        .unwrap();
+    output_text(f.cli(&["git", "push", "origin", "master"]));
+    assert_eq!(
+        remote.find_reference("refs/heads/master").unwrap().target(),
+        Some(commit)
+    );
+    // Git's own nonzero exit status must survive the wrapper.
+    assert_eq!(
+        f.cli(&["git", "config", "--get", "filetrail.missing"])
+            .status
+            .code(),
+        Some(1)
+    );
+    assert_eq!(
+        f.cli(&["git", "rev-parse", "--verify", "refs/heads/missing"])
+            .status
+            .code(),
+        Some(128)
+    );
+}
+
+#[test]
+fn git_passthrough_preserves_arguments_io_exit_status_and_operation_lock() {
+    use std::ffi::OsString;
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::Stdio;
+
+    let f = Fixture::new("macos", false);
+    let bin = f._temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(&git, "#!/bin/sh\nprintf '%s\\0' \"$PWD\" \"$@\"\nprintf ready >&2\nIFS= read -r input\nprintf '%s' \"$input\"\nexit 37\n").unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let args = vec![
+        OsString::from("-c"),
+        OsString::from("user.name=Quoted 'user' $cash"),
+        OsString::from("push"),
+        OsString::from("origin"),
+        OsString::from("master"),
+        OsString::from("--"),
+        OsString::from("--data-dir"),
+        OsString::from_vec(b"non-utf8-\xff".to_vec()),
+    ];
+    let mut child = Command::new(env!("CARGO_BIN_EXE_filetrail"))
+        .arg("--data-dir")
+        .arg(&f.store.root)
+        .arg("git")
+        .args(&args)
+        .env("PATH", &bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 5];
+    child
+        .stderr
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .unwrap();
+    assert_eq!(&ready, b"ready");
+    let lock = f.store.lock_file("operation.lock").unwrap();
+    assert!(FileExt::try_lock_exclusive(&lock).is_err());
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"input from caller\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    let mut expected = fs::canonicalize(&f.repository)
+        .unwrap()
+        .as_os_str()
+        .as_bytes()
+        .to_vec();
+    expected.push(0);
+    for arg in &args {
+        expected.extend_from_slice(arg.as_bytes());
+        expected.push(0);
+    }
+    expected.extend_from_slice(b"input from caller");
+    assert_eq!(output.stdout, expected);
+    FileExt::try_lock_exclusive(&lock).unwrap();
+}
+
+#[test]
+fn git_reports_missing_executable_without_affecting_builtin_commands() {
+    let f = Fixture::new("macos", false);
+    let missing = f._temp.path().join("no executables");
+    let command = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_filetrail"))
+            .arg("--data-dir")
+            .arg(&f.store.root)
+            .args(args)
+            .env("PATH", &missing)
+            .output()
+            .unwrap()
+    };
+    let result = command(&["git", "status"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("install git"));
+    output_text(command(&["status"]));
+    output_text(command(&["cd"]));
 }
 
 #[test]
