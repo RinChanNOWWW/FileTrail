@@ -46,6 +46,11 @@ jobs:
 
   format:
     name: Rust and TOML formatting
+    needs: version
+    # Tag-triggered release checks intentionally skip the PR-only version job.
+    if: >-
+      ${{ !cancelled() && (needs.version.result == 'success' ||
+          (github.event_name != 'pull_request' && needs.version.result == 'skipped')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -64,6 +69,9 @@ jobs:
 
   check:
     name: Check, Clippy, tests, and binary (${{ matrix.os }})
+    needs: format
+    # Allow the skipped version ancestor on releases, but require formatting to pass.
+    if: ${{ !cancelled() && needs.format.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
