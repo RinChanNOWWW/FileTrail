@@ -394,6 +394,15 @@ pub fn fingerprint(path: &Path) -> Result<Option<String>> {
 }
 
 fn copy_atomic(source: &Path, destination: &Path, expected: &str) -> Result<()> {
+    copy_atomic_checked(source, destination, expected, true)
+}
+
+pub(crate) fn copy_atomic_checked(
+    source: &Path,
+    destination: &Path,
+    expected: &str,
+    overwrite: bool,
+) -> Result<()> {
     let parent = destination.parent().context("missing destination parent")?;
     fs::create_dir_all(parent)?;
     let temporary = tempfile::NamedTempFile::new_in(parent)?;
@@ -415,8 +424,11 @@ fn copy_atomic(source: &Path, destination: &Path, expected: &str) -> Result<()> 
     {
         bail!("source changed during copy; will retry on the next scan");
     }
-    temporary
-        .persist(destination)
-        .map_err(|error| error.error)?;
+    if overwrite {
+        temporary.persist(destination)
+    } else {
+        temporary.persist_noclobber(destination)
+    }
+    .map_err(|error| error.error)?;
     Ok(())
 }

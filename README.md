@@ -31,6 +31,28 @@ with `./install.sh zsh`. It installs with Cargo, then configures that shell's
 completion. Open a new shell afterward. The installation root defaults to
 `${CARGO_HOME:-$HOME/.cargo}`; set `CARGO_INSTALL_ROOT` to override it.
 
+## Agent skill
+
+The [FileTrail skill](skills/filetrail/SKILL.md) teaches an agent what FileTrail
+does and how to use its commands, including restoration. To install it, simply
+send Codex this message:
+
+```text
+Please install this Skill: https://github.com/RinChanNOWWW/FileTrail/tree/master/skills/filetrail
+```
+
+You can also run Codex's GitHub skill installer manually:
+
+```sh
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
+  --repo RinChanNOWWW/FileTrail --ref master --path skills/filetrail
+```
+
+If the skill is on another branch or tag, replace `master` with that ref.
+The skill installs as `filetrail`; invoke it with `$filetrail` in a supporting
+agent environment. It provides instructions only: the agent still needs access
+to the FileTrail executable and the files on the machine being managed.
+
 ## Tab completion and shell integration
 
 If you installed FileTrail with `cargo install`, enable completion with:
@@ -109,6 +131,47 @@ Directories are watched recursively. Exclusions are relative to the source root.
 Relative source paths are resolved from your current directory; parent-directory
 symlinks are resolved to their actual locations. Sources, destinations, and the
 application data directory must not overlap.
+
+## Restore files to this system
+
+Select an existing FileTrail repository with `init` on a new machine, then restore:
+
+```sh
+filetrail init ~/dotfiles --subdir macos # Only for a profile not yet initialized
+filetrail restore --dry-run
+filetrail restore
+filetrail restore macos/__HOME__/.zshrc macos/__HOME__/.config/nvim
+filetrail restore --track macos/__HOME__/.zshrc
+filetrail restore --overwrite macos/__HOME__/.zshrc
+```
+
+Paths are relative to the repository root, including the configured subdirectory.
+Supply multiple files or directories; directories are copied recursively and overlapping
+selections are copied once. With no paths, restore all files under the current
+subdirectory's `__HOME__` and `__ROOT__`. Other subdirectories and repository files
+such as READMEs are not restored. `__HOME__` maps to the current user's Home;
+`__ROOT__` maps to `/` and requires write access at the original absolute locations.
+The repository's current working files are used, including uncommitted files.
+
+By default, this only copies files and leaves management unchanged. Identical files
+are left alone; different local contents, file types, or permissions require
+`--overwrite`. Local directories are never replaced by files or links. Files absent
+from the repository are not deleted. File permissions and symlinks are preserved;
+symlink targets are not copied or rewritten. Restore refuses symlink ancestors,
+paths into the repository or application data directory, and `.git` paths.
+Nested `.git` entries are skipped.
+
+`--track` also adds each restored file or symlink to management with deletion disabled,
+so extra local files in the same directory do not become managed. Compatible existing
+mappings retain their settings; disabled or excluded mappings must be adjusted before
+using `--track`. Files encoded under `__ROOT__` that now belong inside Home can be
+copied, but must use the `__HOME__` layout to be tracked. Empty directories are created
+but are not added as management entries. Afterward, ordinary synchronization flows
+from this system back to the repository; restore does not start the daemon or commit.
+
+`--dry-run` previews copying and optional management changes without applying them.
+All selections and conflicts are checked before copying. An I/O error during execution
+can leave some files restored; fix the error and rerun the command.
 
 ## Change the target or start over
 

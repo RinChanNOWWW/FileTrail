@@ -131,6 +131,9 @@ fn completion_generation_includes_nested_commands_without_initialization() {
             "uninstall",
             "retarget",
             "deinit",
+            "restore",
+            "track",
+            "overwrite",
             "from",
             "install",
         ] {
@@ -1821,4 +1824,353 @@ fn retarget_refuses_corrupt_state_and_preserves_disabled_entries() {
         fs::read_to_string(new_repo.join(f.key("a"))).unwrap(),
         "content"
     );
+}
+
+#[test]
+fn restore_copies_all_without_changing_management_or_repository() {
+    let f = Fixture::new("macos", false);
+    f.write("settings", "saved");
+    f.write("nested/tool", "#!/bin/sh\n");
+    fs::set_permissions(
+        f.source.join("nested/tool"),
+        fs::Permissions::from_mode(0o751),
+    )
+    .unwrap();
+    symlink("missing", f.source.join("link")).unwrap();
+    f.sync();
+    let config = fs::read(f.store.root.join("config.toml")).unwrap();
+    let state = f.store.state().unwrap();
+    fs::remove_dir_all(&f.source).unwrap();
+    fs::write(f.repository.join("README.md"), "not restored").unwrap();
+    fs::create_dir_all(f.repository.join("linux/__HOME__")).unwrap();
+    fs::write(
+        f.repository.join("linux/__HOME__/untouched"),
+        "other platform",
+    )
+    .unwrap();
+    output_text(f.cli(&["restore"]));
+    assert_eq!(
+        fs::read_to_string(f.source.join("settings")).unwrap(),
+        "saved"
+    );
+    assert_eq!(
+        fs::metadata(f.source.join("nested/tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o751
+    );
+    assert_eq!(
+        fs::read_link(f.source.join("link")).unwrap(),
+        Path::new("missing")
+    );
+    assert_eq!(fs::read(f.store.root.join("config.toml")).unwrap(), config);
+    assert_eq!(f.store.state().unwrap(), state);
+    assert_eq!(fs::read_to_string(f.target("settings")).unwrap(), "saved");
+    assert!(output_text(f.cli(&["restore"])).contains("unchanged"));
+}
+
+#[test]
+fn restore_selects_multiple_paths_deduplicates_and_previews_tracking() {
+    let f = Fixture::new("", false);
+    f.write("a", "a");
+    f.write("dir/b", "b");
+    f.write("unselected", "c");
+    f.sync();
+    let mut config = f.store.config().unwrap();
+    config.entries.clear();
+    f.store.save_config(&config).unwrap();
+    fs::remove_file(f.store.root.join("state.db")).unwrap();
+    fs::remove_dir_all(&f.source).unwrap();
+    let before = fs::read(f.store.root.join("config.toml")).unwrap();
+    let args = [
+        "restore",
+        "--track",
+        "--dry-run",
+        &f.key("a"),
+        &f.key("dir"),
+        &f.key("dir/b"),
+    ];
+    let preview = output_text(f.cli(&args));
+    assert_eq!(preview.matches("track [").count(), 2);
+    assert!(!f.source.exists());
+    assert!(!f.store.root.join("state.db").exists());
+    assert_eq!(fs::read(f.store.root.join("config.toml")).unwrap(), before);
+    output_text(f.cli(&[
+        "restore",
+        "--track",
+        &f.key("a"),
+        &f.key("dir"),
+        &f.key("dir/b"),
+    ]));
+    assert!(!f.source.join("unselected").exists());
+    let config = f.store.config().unwrap();
+    assert_eq!(config.entries.len(), 2);
+    assert!(
+        config
+            .entries
+            .iter()
+            .all(|entry| !entry.directory && entry.enabled && !entry.delete)
+    );
+    assert_eq!(f.store.state().unwrap().files.len(), 2);
+    f.write("dir/local-only", "stay local");
+    f.write("a", "updated");
+    f.sync();
+    assert_eq!(fs::read_to_string(f.target("a")).unwrap(), "updated");
+    assert!(!f.target("dir/local-only").exists());
+    output_text(f.cli(&["restore", "--track", &f.key("dir")]));
+    assert_eq!(f.store.config().unwrap().entries.len(), 2);
+}
+
+#[test]
+fn restore_preflights_conflicts_and_requires_explicit_overwrite() {
+    let f = Fixture::new("macos", false);
+    f.write("a", "saved a");
+    f.write("z", "saved z");
+    f.sync();
+    fs::remove_file(f.source.join("a")).unwrap();
+    f.write("z", "local edits");
+    let output = f.cli(&["restore"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--overwrite"));
+    assert!(!f.source.join("a").exists());
+    assert_eq!(
+        fs::read_to_string(f.source.join("z")).unwrap(),
+        "local edits"
+    );
+    output_text(f.cli(&["restore", "--overwrite", "--dry-run"]));
+    assert!(!f.source.join("a").exists());
+    output_text(f.cli(&["restore", "--overwrite"]));
+    assert_eq!(fs::read_to_string(f.source.join("z")).unwrap(), "saved z");
+    fs::remove_file(f.source.join("z")).unwrap();
+    fs::create_dir(f.source.join("z")).unwrap();
+    assert!(!f.cli(&["restore", "--overwrite"]).status.success());
+}
+
+#[test]
+fn restore_reuses_existing_management_and_refuses_disabled_or_excluded_tracking() {
+    let f = Fixture::new("macos", true);
+    f.write("a", "saved");
+    f.sync();
+    let mut config = f.store.config().unwrap();
+    config.entries[0].exclude.push("ignored/**".into());
+    f.store.save_config(&config).unwrap();
+    fs::remove_file(f.source.join("a")).unwrap();
+    output_text(f.cli(&["restore", "--track"]));
+    let restored = f.store.config().unwrap();
+    assert_eq!(restored.entries.len(), 1);
+    assert!(restored.entries[0].delete);
+    assert_eq!(restored.entries[0].exclude, vec!["ignored/**"]);
+    assert_eq!(f.store.state().unwrap().files[&f.key("a")].entry, 1);
+    for excluded in [false, true] {
+        config.entries[0].enabled = excluded;
+        config.entries[0].exclude = if excluded { vec!["a".into()] } else { vec![] };
+        f.store.save_config(&config).unwrap();
+        fs::remove_file(f.source.join("a")).unwrap();
+        assert!(!f.cli(&["restore", "--track"]).status.success());
+        assert!(!f.source.join("a").exists());
+        output_text(f.cli(&["restore"]));
+    }
+}
+
+#[test]
+fn restore_rejects_unsafe_selections_and_symlink_ancestors() {
+    let f = Fixture::new("macos", false);
+    f.write("dir/a", "saved");
+    f.sync();
+    fs::remove_dir_all(&f.source).unwrap();
+    for path in [
+        "../escape",
+        "/absolute",
+        "macos/.git/config",
+        "linux/__HOME__/a",
+        "macos/README.md",
+        "macos",
+        &f.key("missing"),
+    ] {
+        assert!(!f.cli(&["restore", path]).status.success(), "{path}");
+        assert!(!f.source.exists());
+    }
+    let outside = f._temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, &f.source).unwrap();
+    assert!(!f.cli(&["restore", "--overwrite"]).status.success());
+    assert!(!outside.join("dir/a").exists());
+    fs::remove_file(&f.source).unwrap();
+    fs::remove_dir_all(f.target("dir")).unwrap();
+    fs::write(outside.join("a"), "outside").unwrap();
+    symlink(&outside, f.target("dir")).unwrap();
+    assert!(!f.cli(&["restore", &f.key("dir/a")]).status.success());
+    assert!(!f.source.exists());
+    // The link itself is restored without traversing its target.
+    output_text(f.cli(&["restore", &f.key("dir")]));
+    assert_eq!(fs::read_link(f.source.join("dir")).unwrap(), outside);
+}
+
+#[test]
+fn restore_home_uses_current_home_and_tracks_only_restored_files() {
+    let f = CompletionFixture::new();
+    let repository = f.temp.path().join("repo");
+    let data = f.temp.path().join("data");
+    let run = |args: &[&str]| {
+        f.command(&f.binary)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("--data-dir")
+            .arg(&data)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    output_text(run(&[
+        "init",
+        repository.to_str().unwrap(),
+        "--subdir",
+        "macos",
+    ]));
+    let repo = Repository::open(&repository).unwrap();
+    repo.config()
+        .unwrap()
+        .set_str("user.name", "Filetrail Test")
+        .unwrap();
+    repo.config()
+        .unwrap()
+        .set_str("user.email", "filetrail@example.invalid")
+        .unwrap();
+    let root = repository.join("macos/__HOME__");
+    fs::create_dir_all(root.join(".config/example/empty")).unwrap();
+    fs::write(root.join(".config/example/settings"), "saved").unwrap();
+    fs::write(root.join(".zshrc"), "shell").unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), "never restore").unwrap();
+    output_text(run(&["restore", "--track"]));
+    assert_eq!(fs::read_to_string(f.home.join(".zshrc")).unwrap(), "shell");
+    assert!(f.home.join(".config/example/empty").is_dir());
+    assert!(!f.home.join(".git").exists());
+    assert_eq!(output_text(run(&["list"])).lines().count(), 2);
+    assert!(output_text(run(&["sync"])).contains("Up to date"));
+}
+
+#[test]
+fn restore_refuses_protected_locations_and_corrupt_state_before_copying() {
+    let f = Fixture::new("macos", false);
+    for protected in [&f.store.root, &fs::canonicalize(&f.repository).unwrap()] {
+        let target = f
+            .repository
+            .join("macos/__ROOT__")
+            .join(protected.strip_prefix("/").unwrap())
+            .join("injected");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "bad").unwrap();
+        let relative = target
+            .strip_prefix(&f.repository)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !f.cli(&["restore", "--overwrite", relative])
+                .status
+                .success()
+        );
+        assert!(!protected.join("injected").exists());
+        fs::remove_file(target).unwrap();
+    }
+    f.write("a", "saved");
+    f.sync();
+    fs::remove_file(f.source.join("a")).unwrap();
+    fs::write(f.store.root.join("state.db"), "corrupt").unwrap();
+    assert!(!f.cli(&["restore", &f.key("a")]).status.success());
+    assert!(!f.source.join("a").exists());
+    assert_eq!(
+        fs::read_to_string(f.store.root.join("state.db")).unwrap(),
+        "corrupt"
+    );
+}
+
+#[test]
+fn restore_tracking_updates_selected_baselines_without_forward_sync_or_staging() {
+    let f = Fixture::new("macos", false);
+    f.write("a", "old");
+    f.write("b", "old b");
+    f.sync();
+    fs::write(f.target("a"), "repository edit").unwrap();
+    f.write("b", "local edit");
+    let report = filetrail::sync::run(&f.store, false, None).unwrap();
+    assert!(!report.errors.is_empty());
+    // Keep an unrelated source change pending to prove restore does not run sync.
+    f.write("b", "pending local edit");
+    let repo = Repository::open(&f.repository).unwrap();
+    fs::write(f.repository.join("unmanaged"), "staged").unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new("unmanaged")).unwrap();
+    index.write().unwrap();
+    let before = fs::read(repo.path().join("index")).unwrap();
+    output_text(f.cli(&["restore", "--track", "--overwrite", &f.key("a")]));
+    assert_eq!(
+        fs::read_to_string(f.source.join("a")).unwrap(),
+        "repository edit"
+    );
+    assert_eq!(fs::read_to_string(f.target("b")).unwrap(), "local edit");
+    assert!(!f.store.state().unwrap().conflicts.contains_key(&f.key("a")));
+    assert_eq!(fs::read(repo.path().join("index")).unwrap(), before);
+    assert!(repo.head().is_err());
+    f.sync();
+}
+
+#[test]
+fn restore_overwrite_replaces_leaf_links_without_modifying_their_targets() {
+    let f = Fixture::new("", false);
+    f.write("a", "saved");
+    f.sync();
+    let outside = f._temp.path().join("outside");
+    fs::write(&outside, "keep").unwrap();
+    fs::remove_file(f.source.join("a")).unwrap();
+    symlink(&outside, f.source.join("a")).unwrap();
+    assert!(!f.cli(&["restore", &f.key("a")]).status.success());
+    output_text(f.cli(&["restore", "--overwrite", &f.key("a")]));
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+    assert!(
+        !fs::symlink_metadata(f.source.join("a"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    fs::remove_file(f.target("a")).unwrap();
+    symlink("missing", f.target("a")).unwrap();
+    output_text(f.cli(&["restore", "--overwrite", &f.key("a")]));
+    assert_eq!(
+        fs::read_link(f.source.join("a")).unwrap(),
+        Path::new("missing")
+    );
+}
+
+#[test]
+fn restore_rejects_reserved_root_links_special_files_and_case_aliases() {
+    let f = Fixture::new("macos", false);
+    fs::create_dir_all(f.repository.join("macos")).unwrap();
+    symlink(&f.source, f.repository.join("macos/__HOME__")).unwrap();
+    assert!(!f.cli(&["restore", "--overwrite"]).status.success());
+    fs::remove_file(f.repository.join("macos/__HOME__")).unwrap();
+    fs::create_dir_all(f.target("")).unwrap();
+    // A socket is a special file that must never be treated as file content.
+    // Use a FIFO instead so this test does not require socket sandbox access.
+    let output = Command::new("mkfifo")
+        .arg(f.target("pipe"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!f.cli(&["restore", &f.key("pipe")]).status.success());
+    assert!(!f.source.join("pipe").exists());
+    let alias = f.store.root.parent().unwrap().join("STATE/injected");
+    let relative = Path::new("macos/__ROOT__").join(alias.strip_prefix("/").unwrap());
+    let target = f.repository.join(&relative);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(target, "bad").unwrap();
+    assert!(
+        !f.cli(&["restore", relative.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!f.store.root.join("injected").exists());
 }

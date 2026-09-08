@@ -8,6 +8,9 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
 - README.md is the primary English README; README_zh.md is the Chinese version.
   Every README change must update both files in the same change, keeping behavior,
   examples, and section coverage equivalent. Preserve their language-switch links.
+- When adding, removing, or changing a CLI command, option, default, or user-visible
+  behavior, update `skills/filetrail/SKILL.md` in the same change so the installable
+  agent skill stays accurate. Keep it focused on FileTrail's purpose and usage.
 - Use the exact toolchain in rust-toolchain.toml. Keep Cargo.lock checked in.
 - Building requires a C compiler for vendored libgit2 and SQLite. The distributed executable
   needs no separate Rust installation, and its built-in commands need no system Git.

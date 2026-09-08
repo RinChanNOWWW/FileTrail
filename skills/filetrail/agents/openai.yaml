@@ -1,0 +1,3 @@
+interface:
+  display_name: "FileTrail"
+  short_description: "Sync, restore, and version files with FileTrail"
