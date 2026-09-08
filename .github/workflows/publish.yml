@@ -1,0 +1,101 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ci:
+    name: Release checks
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to crates.io
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Check tag matches Cargo.toml version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          expected = f"v{version}"
+          actual = os.environ["RELEASE_TAG"]
+          if actual != expected:
+              raise SystemExit(f"Tag {actual!r} does not match Cargo.toml version: expected {expected!r}")
+          print(f"Publishing filetrail {version} from {actual}")
+          PY
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo '::error::Set CARGO_REGISTRY_TOKEN in the crates-io GitHub environment.'
+            exit 1
+          fi
+          cargo publish --locked --registry crates-io
+
+  release:
+    name: Prepare draft GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: filetrail-*
+          merge-multiple: true
+          path: artifacts
+      - name: Generate and verify SHA-256 checksums
+        working-directory: artifacts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          linux_archives=(filetrail-*-unknown-linux-gnu.tar.gz)
+          macos_archives=(filetrail-*-apple-darwin.tar.gz)
+          if (( ${#linux_archives[@]} == 0 || ${#macos_archives[@]} == 0 )); then
+            echo '::error::Both Linux and macOS release archives are required.'
+            exit 1
+          fi
+          sha256sum -- filetrail-*.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Create or update draft release
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/filetrail-release-draft"; then
+            if [ "$(cat "$RUNNER_TEMP/filetrail-release-draft")" != true ]; then
+              echo '::error::The release is already published; refusing to change it.'
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" filetrail-*.tar.gz SHA256SUMS --clobber
+          else
+            gh release create "$RELEASE_TAG" filetrail-*.tar.gz SHA256SUMS \
+              --draft --verify-tag --title "FileTrail $RELEASE_TAG" --generate-notes
+          fi

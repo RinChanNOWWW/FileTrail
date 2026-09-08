@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -30,6 +31,8 @@ jobs:
         run: cargo install taplo-cli --version 0.10.0 --locked
       - name: Check TOML formatting and alphabetical key order
         run: taplo fmt --check
+      - name: Validate Cargo manifest schema
+        run: taplo lint Cargo.toml
 
   check:
     name: Check, Clippy, tests, and binary (${{ matrix.os }})
@@ -62,8 +65,19 @@ jobs:
         run: cargo build --locked --release
       - name: Smoke test
         run: ./target/release/filetrail --help
+      - name: Verify crates.io package without publishing
+        run: cargo publish --dry-run --locked --registry crates-io
+      - name: Package standalone binary
+        shell: bash
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          package="filetrail-v${version}-${target}"
+          mkdir -p "target/dist/$package" target/artifacts
+          cp target/release/filetrail LICENSE README.md README_zh.md "target/dist/$package/"
+          tar -czf "target/artifacts/$package.tar.gz" -C target/dist "$package"
       - uses: actions/upload-artifact@v4
         with:
           name: filetrail-${{ runner.os }}-${{ runner.arch }}
-          path: target/release/filetrail
+          path: target/artifacts/*.tar.gz
           if-no-files-found: error

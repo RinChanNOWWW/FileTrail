@@ -15,6 +15,9 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
   `cargo test --locked --all-targets`, and `cargo test --locked --doc`.
 - Completion integration tests require Bash, Zsh, and Fish on PATH.
 - Run `taplo fmt` and `taplo fmt --check` with taplo-cli 0.10.0.
+- Run `taplo lint Cargo.toml` to validate the manifest schema. `.taplo.toml` selects
+  `.schemas/cargo.json`, which works around Taplo's loading of external references
+  inside `anyOf` while preserving the complete official Cargo schema validation.
 - Every Rust import must be its own `use` statement. Do not use grouped braces.
   rustfmt's `imports_granularity = "Item"` enforces this on the pinned nightly.
 - Keep TOML keys alphabetically sorted, particularly `[package]` and dependency
@@ -23,6 +26,39 @@ one executable for macOS and Linux. Read README.md before changing its behavior.
   directories and a temporary Git identity. Never test against real dotfiles.
 - Keep OS service installation out of automated tests. Test rendered definitions.
 - Do not introduce a dependency on an external `git` executable for core commands.
+
+## Publishing to crates.io
+
+- PR CI runs `cargo publish --dry-run --locked --registry crates-io` on macOS and
+  Linux without credentials. The final `aborting upload due to dry run` warning is
+  Cargo's expected confirmation that nothing was uploaded.
+- `.github/workflows/publish.yml` runs on pushed `v*` tags and reuses the complete
+  CI workflow. Only after all checks pass does it require an exact
+  `v<package.version>` match (for example, `v0.1.0`), then publish to crates.io.
+- After crates.io publishing succeeds, the workflow creates a draft GitHub
+  Release with generated notes. It attaches the tested macOS and Linux binaries
+  as `filetrail-v<version>-<Rust target>.tar.gz` archives, including both READMEs
+  and the license, plus a `SHA256SUMS` file. Archives preserve executable permissions.
+  Publish the GitHub Release manually after reviewing it. A rerun can replace
+  assets on an existing draft but refuses to modify a published release. If this
+  job fails after crates.io publishing, rerun only failed jobs to avoid publishing
+  the same crate version again.
+- In GitHub repository Settings → Environments, create `crates-io`, allow release
+  tags matching `v*`, and add an environment secret named `CARGO_REGISTRY_TOKEN`.
+  Its value must be a crates.io API token, not a GitHub personal access token.
+  No extra GitHub credentials are needed. Only the draft Release job grants the
+  built-in `GITHUB_TOKEN` `contents: write`; other jobs use `contents: read`.
+- The crates.io account must have a verified email and permission to publish
+  `filetrail`. The token needs permission to publish new crates for the first
+  release, and publish new versions for later releases. Scope it to `filetrail`
+  where supported and set an expiration date. Create tokens at
+  <https://crates.io/settings/tokens>.
+- Update `Cargo.toml` and the root package version in `Cargo.lock` together,
+  commit the release changes, then push the matching tag. For version `0.1.0`:
+  `git tag v0.1.0` followed by `git push origin v0.1.0`.
+  A published version cannot be overwritten; each new release needs a new version.
+- For local verification of uncommitted changes only, add `--allow-dirty` to the
+  dry-run command. CI and actual publishing deliberately require a clean checkout.
 
 ## Architecture and invariants
 
