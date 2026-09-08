@@ -28,6 +28,26 @@ filetrail --help
 它先通过 Cargo 安装，再配置所选 shell 的补全，完成后重新打开 shell 即可。
 安装根目录默认为 `${CARGO_HOME:-$HOME/.cargo}`，可通过 `CARGO_INSTALL_ROOT` 覆盖。
 
+## Agent skill
+
+[FileTrail skill](skills/filetrail/SKILL.md) 向 agent 介绍 FileTrail 的用途和命令用法，
+包括文件恢复。直接把下面这句话发给 Codex，即可让它安装：
+
+```text
+请安装这个 Skill：https://github.com/RinChanNOWWW/FileTrail/tree/master/skills/filetrail
+```
+
+也可以手动运行 Codex 的 GitHub skill 安装脚本：
+
+```sh
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-installer/scripts/install-skill-from-github.py" \
+  --repo RinChanNOWWW/FileTrail --ref master --path skills/filetrail
+```
+
+如果 skill 位于其他分支或标签，将 `master` 替换为对应 ref。
+安装后的名称为 `filetrail`，可在支持 skill 的 agent 环境中通过 `$filetrail` 调用。
+skill 只提供使用说明；agent 仍需要能访问被管理机器上的 FileTrail 可执行文件和相关文件。
+
 ## Tab 补全与 shell 集成
 
 如果使用 `cargo install` 安装 FileTrail，执行以下命令启用补全：
@@ -99,6 +119,40 @@ filetrail add ~/notes --exclude '**/*.tmp'
 
 目录默认递归监听，排除规则相对于来源根目录。相对来源路径以当前目录为基准，
 父目录中的符号链接会解析为实际路径。来源、目标和应用数据目录不能相互重叠。
+
+## 恢复文件到当前系统
+
+在新机器上通过 `init` 选择已有的 FileTrail 仓库，然后恢复：
+
+```sh
+filetrail init ~/dotfiles --subdir macos # 仅用于尚未初始化的配置
+filetrail restore --dry-run
+filetrail restore
+filetrail restore macos/__HOME__/.zshrc macos/__HOME__/.config/nvim
+filetrail restore --track macos/__HOME__/.zshrc
+filetrail restore --overwrite macos/__HOME__/.zshrc
+```
+
+路径相对于仓库根目录，需要包含已配置的子目录。可以一次指定多个文件或目录；
+目录会递归拷贝，重叠选择只拷贝一次。不指定路径时，恢复当前子目录下
+`__HOME__` 和 `__ROOT__` 中的所有文件。其他子目录及 README 等仓库文件不会恢复。
+`__HOME__` 映射到当前用户的 Home，`__ROOT__` 映射到 `/`，需要对原始绝对位置
+具有写入权限。恢复使用仓库当前工作区中的文件，包括尚未提交的文件。
+
+默认仅拷贝文件，不改变管理状态。相同文件保持不变；本地内容、文件类型或权限
+不同时，需要显式传入 `--overwrite`。不会用文件或链接替换本地目录，也不会删除
+仓库中不存在的本地文件。文件权限和符号链接会保留，但不会拷贝或改写链接指向的目标。
+恢复拒绝经过符号链接父目录、写入仓库或应用数据目录，以及显式选择 `.git` 路径；
+递归扫描时跳过嵌套的 `.git` 项。
+
+`--track` 会将恢复的每个文件或符号链接加入管理，默认关闭删除传播，同目录下
+额外存在的本地文件不会因此纳入管理。兼容的已有管理项保留原设置；已禁用或被排除的
+管理项需要先调整设置才能使用 `--track`。编码在 `__ROOT__` 下、但在当前系统中属于
+Home 的文件可以拷贝，加入管理则需要使用 `__HOME__` 布局。空目录会创建，但不会作为
+管理项加入。之后普通同步仍从当前系统同步到仓库；恢复不会启动后台任务或提交。
+
+`--dry-run` 预览拷贝和可选的管理变更，不实际应用。所有选择和冲突都会在拷贝前检查。
+执行期间发生 I/O 错误可能留下部分已恢复的文件；修复错误后可重新运行命令。
 
 ## 更换目标或重新初始化
 

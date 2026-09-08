@@ -69,6 +69,20 @@ enum Commands {
     },
     /// List source mappings and IDs.
     List,
+    /// Copy repository files back to this system; does not add management by default.
+    Restore {
+        /// Repository-relative files/directories; omitted restores both reserved roots in the current subdir.
+        paths: Vec<PathBuf>,
+        /// Add restored files to management, preserving compatible existing mappings.
+        #[arg(long)]
+        track: bool,
+        /// Replace local files or symlinks with different contents (never directories).
+        #[arg(long)]
+        overwrite: bool,
+        /// Preview copies and management changes without writing them.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Stop tracking an entry, keeping its destination files.
     Remove {
         id: u64,
@@ -389,6 +403,19 @@ fn execute(cli: Cli) -> Result<ExitCode> {
                 store.save_config(&config)?;
             }
             print_report(filetrail::sync::run(&store, false, None)?)?;
+        }
+        Commands::Restore {
+            paths,
+            track,
+            overwrite,
+            dry_run,
+        } => {
+            let report = filetrail::restore::run(&store, &paths, track, overwrite, dry_run)?;
+            if report.actions.is_empty() {
+                println!("Nothing to restore");
+            } else {
+                println!("{}", report.text());
+            }
         }
         Commands::List => {
             let _lock = store.lock()?;

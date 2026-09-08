@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod git;
 pub mod lifecycle;
 pub mod manifest;
+pub mod restore;
 pub mod service;
 mod state;
 pub mod sync;
