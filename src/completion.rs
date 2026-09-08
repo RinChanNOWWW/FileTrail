@@ -37,10 +37,13 @@ pub fn install(shell: Shell, binary: &Path) -> Result<Vec<PathBuf>> {
             vec![home.join(".bashrc"), login]
         }
         Shell::Zsh => vec![environment_directory("ZDOTDIR", &home).join(".zshrc")],
-        Shell::Fish => vec![
-            environment_directory("XDG_CONFIG_HOME", &home.join(".config"))
-                .join("fish/completions/filetrail.fish"),
-        ],
+        Shell::Fish => {
+            let fish = environment_directory("XDG_CONFIG_HOME", &home.join(".config")).join("fish");
+            vec![
+                fish.join("completions/filetrail.fish"),
+                fish.join("functions/filetrail.fish"),
+            ]
+        }
         _ => bail!("automatic installation supports bash, zsh, and fish only"),
     };
 
@@ -124,6 +127,18 @@ fn executable_expression(shell: Shell, binary: &Path, home: &Path) -> Result<Str
         Shell::Fish => format!("'{}'", binary.replace('\\', "\\\\").replace('\'', "\\'")),
         _ => format!("'{}'", binary.replace('\'', "'\\''")),
     })
+}
+
+/// A child process cannot change its parent's directory. These shell functions
+/// intercept `cd`, while all other commands keep their original arguments.
+pub fn shell_integration(shell: Shell, binary: &Path) -> Result<String> {
+    let template = match shell {
+        Shell::Bash | Shell::Zsh => include_str!("shell_integration.sh"),
+        Shell::Fish => include_str!("shell_integration.fish"),
+        _ => return Ok(String::new()),
+    };
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    Ok(template.replace("@FILETRAIL@", &executable_expression(shell, binary, &home)?))
 }
 
 fn hook(shell: Shell, binary: &Path, home: &Path) -> Result<String> {

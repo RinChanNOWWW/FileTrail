@@ -1,7 +1,11 @@
 #![forbid(unsafe_code)]
 
+use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
@@ -90,6 +94,18 @@ enum Commands {
     Resume,
     /// Show repository changes, ownership, conflicts, and daemon status.
     Status,
+    /// Jump to the target repository with shell integration; otherwise print its path.
+    Cd {
+        /// Terminate the path with NUL for shell integration and scripts.
+        #[arg(long)]
+        print0: bool,
+    },
+    /// Run system Git in the target repository. Put FileTrail options before git.
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Git {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
     /// Show staged and working tree diffs, including untracked file contents.
     Diff {
         paths: Vec<String>,
@@ -113,7 +129,7 @@ enum Commands {
     },
     /// Validate configuration, Git state, source availability, and mappings.
     Doctor,
-    /// Generate completions or install Tab completion for Bash, Zsh, or Fish.
+    /// Generate completions or install Tab completion and directory jumping for Bash, Zsh, or Fish.
     Completions {
         /// Shell to generate/install for; --install defaults to $SHELL.
         #[arg(required_unless_present = "install")]
@@ -151,14 +167,39 @@ enum ServiceCommands {
     Show,
 }
 
-fn main() {
-    if let Err(error) = execute(Cli::parse()) {
-        eprintln!("error: {error:#}");
-        std::process::exit(1);
+fn main() -> ExitCode {
+    let cli = Cli::try_parse_from(git_passthrough_arguments(std::env::args_os().collect()))
+        .unwrap_or_else(|error| error.exit());
+    match execute(cli) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn execute(cli: Cli) -> Result<()> {
+fn git_passthrough_arguments(mut arguments: Vec<OsString>) -> Vec<OsString> {
+    // Clap normally recognizes global options before the first trailing value.
+    // Insert a delimiter so *every* argument after `git` belongs to Git, including
+    // a leading --data-dir or --. Only inspect FileTrail's root-level options.
+    let mut index = 1;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--data-dir" {
+            index += 2;
+        } else if argument.as_encoded_bytes().starts_with(b"--data-dir=") {
+            index += 1;
+        } else {
+            if argument == "git" {
+                arguments.insert(index + 1, OsString::from("--"));
+            }
+            break;
+        }
+    }
+    arguments
+}
+
+fn execute(cli: Cli) -> Result<ExitCode> {
     if let Commands::Completions { shell, install } = cli.command {
         let shell = shell.or_else(Shell::from_env).context(
             "cannot detect shell; specify bash, zsh, or fish, e.g. completions zsh --install",
@@ -168,7 +209,9 @@ fn execute(cli: Cli) -> Result<()> {
             for path in paths {
                 println!("Configured {}", filetrail::completion::display_path(&path));
             }
-            println!("{shell} Tab completion installed. Open a new shell to activate it.");
+            println!(
+                "{shell} Tab completion installed, including filetrail cd integration. Open a new shell to activate it."
+            );
         } else {
             clap_complete::generate(
                 shell,
@@ -176,8 +219,12 @@ fn execute(cli: Cli) -> Result<()> {
                 "filetrail",
                 &mut std::io::stdout(),
             );
+            print!(
+                "{}",
+                filetrail::completion::shell_integration(shell, &std::env::current_exe()?)?
+            );
         }
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
     let store = Store::new(data_root(cli.data_dir)?)?;
     // Lifecycle commands share a separate lock: never wait for a daemon while
@@ -417,6 +464,25 @@ fn execute(cli: Cli) -> Result<()> {
                 filetrail::daemon::request(&store, "status").unwrap_or_else(|_| "stopped".into())
             );
         }
+        Commands::Cd { print0 } => {
+            let _lock = store.lock()?;
+            let config = store.config()?;
+            filetrail::git::open(&config)?;
+            let path = config
+                .repository
+                .to_str()
+                .context("repository path is not UTF-8")?;
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(path.as_bytes())?;
+            stdout.write_all(if print0 { b"\0" } else { b"\n" })?;
+        }
+        Commands::Git { args } => {
+            let status = filetrail::git::run(&store, &args)?;
+            let code = status
+                .code()
+                .unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
+            return Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)));
+        }
         Commands::Diff { paths } => print!("{}", filetrail::git::diff(&store, &paths)?),
         Commands::Commit { message, paths } => println!(
             "{}",
@@ -486,7 +552,7 @@ fn execute(cli: Cli) -> Result<()> {
         }
         Commands::Completions { .. } => unreachable!(),
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_report(report: filetrail::sync::Report) -> Result<()> {
@@ -515,12 +581,15 @@ fn data_root(override_dir: Option<PathBuf>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     use clap::Parser;
 
     use super::Cli;
+    use super::Commands;
     use super::data_root;
+    use super::git_passthrough_arguments;
 
     #[test]
     fn add_rejects_custom_targets() {
@@ -553,5 +622,35 @@ mod tests {
             Cli::try_parse_from(["filetrail", "--config-dir", "/tmp/filetrail-test", "status"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn git_arguments_are_passed_through_including_options_and_separators() {
+        for args in [
+            vec![],
+            vec!["--help"],
+            vec!["--version"],
+            vec!["--data-dir", "passed-to-git"],
+            vec!["--", "status"],
+            vec!["-c", "user.name=Test User", "status", "--short"],
+            vec!["push", "origin", "master"],
+            vec!["diff", "--", "--data-dir", "a file"],
+            vec!["show", "--help", "--version"],
+        ] {
+            let mut arguments = vec!["filetrail", "--data-dir", "/tmp/profile", "git"];
+            arguments.extend(&args);
+            let cli = Cli::try_parse_from(git_passthrough_arguments(
+                arguments.into_iter().map(OsString::from).collect(),
+            ))
+            .unwrap();
+            assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/profile")));
+            let Commands::Git { args: parsed } = cli.command else {
+                panic!("expected git command");
+            };
+            assert_eq!(
+                parsed,
+                args.into_iter().map(OsString::from).collect::<Vec<_>>()
+            );
+        }
     }
 }

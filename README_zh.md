@@ -6,7 +6,8 @@ FileTrail 是一个支持 Git 版本管理的文件同步工具。它监听你�
 将变化同步到本地 Git 仓库，让你查看差异并决定何时提交。
 
 你可以用它管理分散在电脑上的 dotfiles、脚本、笔记等文件，也可以在同一仓库中
-分别保存 macOS 和 Linux 的配置。所有功能由一个可执行文件完成，无需额外安装 Git。
+分别保存 macOS 和 Linux 的配置。所有功能由一个可执行文件提供。内置同步和版本管理命令
+无需额外安装 Git；可选的 `filetrail git` 透传命令使用系统 Git。
 
 ## 安装
 
@@ -27,7 +28,7 @@ filetrail --help
 它先通过 Cargo 安装，再配置所选 shell 的补全，完成后重新打开 shell 即可。
 安装根目录默认为 `${CARGO_HOME:-$HOME/.cargo}`，可通过 `CARGO_INSTALL_ROOT` 覆盖。
 
-## Tab 补全
+## Tab 补全与 shell 集成
 
 如果使用 `cargo install` 安装 FileTrail，执行以下命令启用补全：
 
@@ -46,9 +47,10 @@ filetrail completions fish --install
 执行你所用 shell 对应的命令，然后重新打开 shell。Tab 可以补全子命令
 （包括 `daemon` 和 `service` 的操作）、选项及文件路径。例如：
 `filetrail da<Tab>`、`filetrail daemon st<Tab>`、`filetrail add --f<Tab>`。
+这也会启用 `filetrail cd`，用于将当前 shell 的工作目录切换到目标仓库。
 
 安装会保留已有 shell 配置，重复执行不会添加重复配置。配置位置为 `.zshrc`
-（遵循 `ZDOTDIR`）、`.bashrc` 和 Bash 当前使用的登录配置文件，或 Fish 的补全目录
+（遵循 `ZDOTDIR`）、`.bashrc` 和 Bash 当前使用的登录配置文件，或 Fish 的补全与函数目录
 （遵循 `XDG_CONFIG_HOME`）。安装的补全配置和命令输出使用 `$HOME` 表示 Home 路径，
 不写入用户名；Home 以外的路径保留绝对位置。在相同位置升级可执行文件后，补全会同步更新；
 移动可执行文件后需重新安装补全。若要移除补全，删除安装命令所列配置文件中
@@ -209,6 +211,36 @@ filetrail resume
 
 `resume` 会补齐暂停期间的变化。显式执行 `sync` 和 `add` 时，即使自动同步已暂停，
 仍会复制文件。`diff`、`commit` 和 `resolve` 接收的路径都相对于仓库根目录。
+
+## 跳转到仓库与执行 Git
+
+安装 Bash、Zsh 或 Fish 集成后，可以直接跳转到目标仓库：
+
+```sh
+filetrail completions --install # 从旧版升级时也执行一次，以启用目录跳转
+# 重新打开 shell 后：
+filetrail cd
+```
+
+这会将当前 shell 的工作目录切换到仓库根目录，即使配置了 `--subdir` 也是如此。
+未加载 shell 集成时，可执行文件只输出路径；在 Bash 或 Zsh 中可以使用
+`cd "$(command filetrail cd)"`。加载集成后，使用 `command filetrail cd` 仍可输出路径，
+或加上 `--print0` 输出以 NUL 结尾的路径。
+
+无需切换目录，也可以直接在目标仓库执行任意系统 Git 命令：
+
+```sh
+filetrail git status
+filetrail git log --oneline -10
+filetrail git push origin master
+filetrail --data-dir ~/filetrail-work git push origin master
+```
+
+此功能要求 PATH 中存在 `git`，并使用 Git 原有的配置、凭据和 hooks。
+FileTrail 的 `--data-dir` 应放在 `git` 之前；Git 参数、输入输出和退出码会透传。
+Git 命令执行期间，同步操作会等待。该命令不会额外执行同步、暂存或提交。
+`filetrail git commit` 按 Git 的正常暂存规则工作，可以包含任意已暂存文件；
+`filetrail commit` 仍然只提交受管理的修改。
 
 ## 处理冲突
 
